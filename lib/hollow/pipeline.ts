@@ -80,7 +80,7 @@ export async function perceive(req: PerceiveRequest): Promise<HollowPerceiveResu
   }
 
   // ── Steps 3–4: CSS + Yoga Flexbox layout ────────────────────────────────────
-  const { layoutMap, deductions: layoutDeductions } = calculateLayout(
+  const { layoutMap, deductions: layoutDeductions } = await calculateLayout(
     body as unknown as Element,
     window
   );
@@ -126,7 +126,7 @@ export async function perceive(req: PerceiveRequest): Promise<HollowPerceiveResu
   resolveGridContainers(body as unknown as Element);
 
   for (const [el, box] of gridLayouts) {
-    calculateSubtreeLayout(el, box, window, layoutMap, layoutDeductions);
+    await calculateSubtreeLayout(el, box, window, layoutMap, layoutDeductions);
   }
 
   // ── Step 6: GDG Spatial ──────────────────────────────────────────────────────

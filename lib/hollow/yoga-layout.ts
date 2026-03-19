@@ -9,6 +9,17 @@
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const Yoga = require('yoga-layout-prebuilt');
 
+// Module-level health check — runs once on cold start.
+// yoga-layout-prebuilt is precompiled JS (no WASM binary), so init is synchronous.
+// This verifies the module loaded and Node.create() is callable.
+try {
+  const _probe = Yoga.Node.create();
+  _probe.free();
+  console.log('[hollow/yoga] Yoga loaded OK — Node.create() functional');
+} catch (err) {
+  console.error('[hollow/yoga] Yoga failed to initialise:', err);
+}
+
 import type { Window } from 'happy-dom';
 import { isLayoutElement } from './dom';
 import { resolveStyles, parsePx, hasCSSVariable } from './css-resolver';
@@ -320,13 +331,13 @@ function freeAll(nodeMap: Map<Element, NodeEntry>): void {
 // pass on each grid cell's contents using the cell's bounding box as the origin.
 // This surfaces layout, absolute elements, and transforms inside grid cells.
 
-export function calculateSubtreeLayout(
+export async function calculateSubtreeLayout(
   el: Element,
   parentBox: LayoutBox,
   win: Window,
   layoutMap: Map<Element, LayoutBox>,
   deductions: ConfidenceDeduction[]
-): void {
+): Promise<void> {
   const nodeMap = new Map<Element, NodeEntry>();
 
   // Root sized to the grid cell's box
@@ -353,7 +364,7 @@ export function calculateSubtreeLayout(
 
 // ─── Main entry point ─────────────────────────────────────────────────────────
 
-export function calculateLayout(body: Element, win: Window): YogaResult {
+export async function calculateLayout(body: Element, win: Window): Promise<YogaResult> {
   const nodeMap = new Map<Element, NodeEntry>();
   const deductions: ConfidenceDeduction[] = [];
 
@@ -363,20 +374,38 @@ export function calculateLayout(body: Element, win: Window): YogaResult {
   root.setHeight(VIEWPORT_HEIGHT);
   root.setFlexDirection(Yoga.FLEX_DIRECTION_COLUMN);
 
+  console.log(`[hollow/yoga] root node set to ${VIEWPORT_WIDTH}x${VIEWPORT_HEIGHT}, building tree…`);
+
   let childIndex = 0;
   for (const child of Array.from(body.children)) {
     buildYogaTree(child, root, childIndex, win, nodeMap, deductions);
     childIndex++;
   }
 
+  console.log(`[hollow/yoga] tree built — ${nodeMap.size} nodes, ${root.getChildCount()} direct body children`);
+
   // Run the layout pass
   root.calculateLayout(VIEWPORT_WIDTH, VIEWPORT_HEIGHT, Yoga.DIRECTION_LTR);
+
+  // Spot-check: log the first direct child's computed layout to detect zero-dimension issues
+  const firstChild = Array.from(body.children)[0];
+  if (firstChild) {
+    const firstEntry = nodeMap.get(firstChild);
+    if (firstEntry) {
+      const spot = firstEntry.yogaNode.getComputedLayout();
+      console.log(`[hollow/yoga] first child <${firstChild.tagName.toLowerCase()}> computed: w=${spot.width} h=${spot.height} x=${spot.left} y=${spot.top}`);
+    } else {
+      console.log(`[hollow/yoga] first child <${firstChild.tagName.toLowerCase()}> not in nodeMap (invisible/skipped)`);
+    }
+  }
 
   // Extract coordinates
   const layoutMap = new Map<Element, LayoutBox>();
   for (const child of Array.from(body.children)) {
     extractLayouts(child, 0, 0, nodeMap, layoutMap);
   }
+
+  console.log(`[hollow/yoga] layout complete — ${layoutMap.size} elements mapped`);
 
   // Cleanup WASM memory
   freeAll(nodeMap);

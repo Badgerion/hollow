@@ -128,7 +128,7 @@ async function main() {
 
   // Steps 3–4: CSS + Yoga
   process.stdout.write('⟳  Yoga Flexbox layout ... ');
-  const { layoutMap, deductions: layoutDeductions } = calculateLayout(body, window);
+  const { layoutMap, deductions: layoutDeductions } = await calculateLayout(body, window);
   console.log(`done  (${layoutMap.size} elements)`);
 
   // Step 5: Grid resolver
