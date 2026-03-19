@@ -40,11 +40,31 @@ const g = global as typeof globalThis & { __hollowYoga?: YogaModule };
 async function getYoga(): Promise<YogaModule> {
   if (g.__hollowYoga) return g.__hollowYoga;
   console.log('[hollow/yoga] init start — loading yoga-layout WASM');
-  const mod = await import('yoga-layout');
+  let mod: { default: YogaModule };
+  try {
+    mod = await import('yoga-layout');
+  } catch (err) {
+    console.error('[hollow/yoga] import("yoga-layout") threw:', err);
+    throw err;
+  }
   const Yoga = mod.default;
+  if (!Yoga || typeof Yoga.Node?.create !== 'function') {
+    const msg = `[hollow/yoga] unexpected module shape — default=${typeof Yoga}`;
+    console.error(msg);
+    throw new Error(msg);
+  }
   g.__hollowYoga = Yoga;
-  console.log('[hollow/yoga] init complete');
+  console.log('[hollow/yoga] init complete — Node.create functional');
   return Yoga;
+}
+
+/**
+ * Exported warm-up helper.
+ * Call `await initYoga()` before entering the layout pipeline so that
+ * the WASM init is explicit, logged, and clearly separated from layout work.
+ */
+export async function initYoga(): Promise<void> {
+  await getYoga();
 }
 
 // ─── Yoga constant helpers ────────────────────────────────────────────────────
