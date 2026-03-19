@@ -45,6 +45,7 @@ export async function perceive(req: PerceiveRequest): Promise<HollowPerceiveResu
     html = req.html;
     finalUrl = req.url ?? 'about:blank';
   } else {
+    if (!req.url) throw new Error('`url` is required when `html` is not provided');
     emit.emitLog(sessionId, 'SYS', `Fetching ${req.url}`);
     const fetched = await fetchUrl(req.url);
     html = fetched.html;
