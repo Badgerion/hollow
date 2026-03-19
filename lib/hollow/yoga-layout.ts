@@ -224,12 +224,20 @@ function buildYogaTree(
 
   if (styles.visibility === 'hidden' || styles.display === 'none') return;
 
-  const node = Yoga.Node.create();
+  // Guard: Node.create() can throw on malformed page content.
+  // Skip the node entirely rather than crashing the whole pipeline.
+  let node: unknown;
+  try {
+    node = Yoga.Node.create();
+  } catch (err) {
+    console.warn(`[hollow/yoga] Node.create() failed for <${el.tagName.toLowerCase()}>:`, err);
+    return;
+  }
 
   try {
     applyStyles(node, styles);
   } catch {
-    // If Yoga rejects a value, continue with defaults
+    // If Yoga rejects a style value, continue with node defaults
   }
 
   if (styles.position === 'absolute' || styles.position === 'fixed') {
@@ -254,16 +262,28 @@ function buildYogaTree(
     }
   }
 
+  try {
+    parentNode.insertChild(node, parentIndex);
+  } catch (err) {
+    console.warn(`[hollow/yoga] insertChild failed for <${el.tagName.toLowerCase()}>:`, err);
+    try { (node as { free(): void }).free(); } catch { /* ignore */ }
+    return;
+  }
+
   nodeMap.set(el, { el, yogaNode: node, styles });
-  parentNode.insertChild(node, parentIndex);
 
   const isGridContainer = styles.display === 'grid' || styles.display === 'inline-grid';
 
   if (!isGridContainer) {
     let childIndex = 0;
     for (const child of Array.from(el.children)) {
-      buildYogaTree(child, node, childIndex, win, nodeMap, deductions);
-      childIndex++;
+      try {
+        buildYogaTree(child, node, childIndex, win, nodeMap, deductions);
+        childIndex++;
+      } catch (err) {
+        console.warn(`[hollow/yoga] child tree failed for <${child.tagName?.toLowerCase()}>:`, err);
+        // continue with remaining siblings
+      }
     }
   }
 }

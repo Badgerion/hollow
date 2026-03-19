@@ -274,27 +274,39 @@ function LogRow({
 function StartScreen() {
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
+  const [ready, setReady] = useState<string | null>(null); // sessionId once pipeline completes
   const [error, setError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => { inputRef.current?.focus(); }, []);
 
+  // Once pipeline completes (ready != null), wait 1.5 s before redirecting.
+  // This lets Redis writes propagate before the Mirror starts polling.
+  useEffect(() => {
+    if (!ready) return;
+    const t = setTimeout(() => {
+      window.location.href = `/mirror?session=${encodeURIComponent(ready)}`;
+    }, 1500);
+    return () => clearTimeout(t);
+  }, [ready]);
+
   async function handleStart() {
     const value = input.trim();
-    if (!value || loading) return;
+    if (!value || loading || ready) return;
     setLoading(true);
     setError(null);
     try {
       const result = await callPerceive(value);
-      // Redirect — full navigation so the page re-mounts with the new sessionId
-      window.location.href = `/mirror?session=${encodeURIComponent(result.sessionId)}`;
+      // Pipeline complete — session is in Redis. Delay redirect slightly.
+      setLoading(false);
+      setReady(result.sessionId);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unknown error');
       setLoading(false);
     }
   }
 
-  const canSubmit = input.trim().length > 0 && !loading;
+  const canSubmit = input.trim().length > 0 && !loading && !ready;
 
   return (
     <div style={{
@@ -388,15 +400,20 @@ function StartScreen() {
         </div>
       )}
 
-      {/* Loading hint */}
+      {/* Status hints */}
       {loading && (
         <div style={{ marginTop: 16, fontSize: 11, color: '#333', letterSpacing: '0.04em' }}>
           Perceiving… this may take 5–15 seconds on cold start.
         </div>
       )}
 
-      {/* Hint */}
-      {!loading && !error && (
+      {ready && (
+        <div style={{ marginTop: 16, fontSize: 11, color: C.teal, letterSpacing: '0.04em' }}>
+          ✓ Session ready — opening Mirror…
+        </div>
+      )}
+
+      {!loading && !ready && !error && (
         <div style={{ marginTop: 16, fontSize: 10, color: '#252525' }}>
           URL (https://…) or raw HTML accepted · Enter to submit
         </div>
