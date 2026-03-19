@@ -144,7 +144,8 @@ export interface HollowPerceiveResult {
 // ─── API Request / Response ───────────────────────────────────────────────────
 
 export interface PerceiveRequest {
-  url: string;
+  /** Target URL. Required unless `html` is provided directly. */
+  url?: string;
   sessionId?: string;
   /** Skip network fetch — parse this HTML directly. Useful for testing or pre-fetched content. */
   html?: string;

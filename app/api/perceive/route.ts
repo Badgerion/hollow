@@ -22,15 +22,17 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 });
   }
 
-  if (!body.url || typeof body.url !== 'string') {
-    return NextResponse.json({ error: '`url` is required' }, { status: 400 });
+  if (!body.url && !body.html) {
+    return NextResponse.json({ error: '`url` or `html` is required' }, { status: 400 });
   }
 
-  // Validate URL
-  try {
-    new URL(body.url);
-  } catch {
-    return NextResponse.json({ error: 'Invalid URL' }, { status: 400 });
+  // Validate URL format only when a URL was supplied
+  if (body.url) {
+    try {
+      new URL(body.url);
+    } catch {
+      return NextResponse.json({ error: 'Invalid URL' }, { status: 400 });
+    }
   }
 
   try {

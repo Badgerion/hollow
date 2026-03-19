@@ -43,7 +43,7 @@ export async function perceive(req: PerceiveRequest): Promise<HollowPerceiveResu
     finalUrl = existingSession.url;
   } else if (req.html) {
     html = req.html;
-    finalUrl = req.url;
+    finalUrl = req.url ?? 'about:blank';
   } else {
     emit.emitLog(sessionId, 'SYS', `Fetching ${req.url}`);
     const fetched = await fetchUrl(req.url);
