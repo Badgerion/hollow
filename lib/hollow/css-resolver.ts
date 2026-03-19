@@ -101,7 +101,7 @@ export function resolveStyles(el: Element, win: Window): ComputedStyles {
       if (val && val !== '') return val.trim();
     }
     // Fall back to inline style
-    const el2 = el as HTMLElement;
+    const el2 = el as unknown as HTMLElement;
     if ('style' in el2) {
       const val = (el2.style as CSSStyleDeclaration).getPropertyValue(prop);
       if (val && val !== '') return val.trim();

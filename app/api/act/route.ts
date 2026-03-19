@@ -71,7 +71,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       );
 
       // The element ID is 1-indexed in the order actionable elements were encountered
-      const target = allInteractive[action.elementId - 1] as HTMLElement | undefined;
+      const target = allInteractive[action.elementId - 1] as unknown as HTMLElement | undefined;
 
       if (!target) {
         window.happyDOM.close();
@@ -82,13 +82,13 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       }
 
       if (action.type === 'fill' && action.value !== undefined) {
-        (target as HTMLInputElement).value = action.value;
+        (target as unknown as HTMLInputElement).value = action.value;
         target.dispatchEvent(new window.Event('input', { bubbles: true }));
         target.dispatchEvent(new window.Event('change', { bubbles: true }));
       } else if (action.type === 'click') {
         target.click();
       } else if (action.type === 'select' && action.value !== undefined) {
-        (target as HTMLSelectElement).value = action.value;
+        (target as unknown as HTMLSelectElement).value = action.value;
         target.dispatchEvent(new window.Event('change', { bubbles: true }));
       }
 
