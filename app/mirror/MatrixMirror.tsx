@@ -72,6 +72,11 @@ function confColor(score: number): string {
 
 function uid() { return `${Date.now()}-${Math.random().toString(36).slice(2)}`; }
 
+function looksLikeUrl(s: string): boolean {
+  const t = s.trim();
+  return t.startsWith('http://') || t.startsWith('https://');
+}
+
 // Inject badge + highlight script into Ghost DOM HTML
 function injectHollowScript(html: string): string {
   const script = `<script>
@@ -114,6 +119,25 @@ function injectHollowScript(html: string): string {
 <\/script>`;
   if (html.includes('</body>')) return html.replace('</body>', script + '</body>');
   return html + script;
+}
+
+// ─── API helper ───────────────────────────────────────────────────────────────
+
+async function callPerceive(input: string, sessionId?: string): Promise<{ sessionId: string }> {
+  const body: Record<string, string> = looksLikeUrl(input)
+    ? { url: input.trim() }
+    : { html: input.trim() };
+  if (sessionId) body.sessionId = sessionId;
+
+  const res = await fetch('/api/perceive', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+
+  const json = await res.json();
+  if (!res.ok) throw new Error(json.error ?? `HTTP ${res.status}`);
+  return json as { sessionId: string };
 }
 
 // ─── Sub-components ───────────────────────────────────────────────────────────
@@ -205,27 +229,18 @@ function LogRow({
         }}
         onClick={hasGdg ? onToggle : undefined}
       >
-        {/* Time */}
         <span style={{ color: C.muted, fontSize: 11, flexShrink: 0, paddingTop: 1 }}>
           {fmtTime(entry.timestamp)}
         </span>
-
-        {/* Tag */}
         <TagBadge tag={entry.tag} />
-
-        {/* Message */}
         <span style={{ color: C.text, fontSize: 12, lineHeight: '18px', flex: 1, wordBreak: 'break-word' as const }}>
           {entry.message}
         </span>
-
-        {/* GDG expand toggle */}
         {hasGdg && (
           <span style={{ color: C.teal, fontSize: 11, flexShrink: 0, paddingTop: 1 }}>
             {expanded ? '▼' : '▶'} MAP
           </span>
         )}
-
-        {/* Confidence + tier on GDG rows */}
         {entry.confidence !== undefined && (
           <span style={{ color: confColor(entry.confidence), fontSize: 11, flexShrink: 0, paddingTop: 1 }}>
             {entry.confidence.toFixed(2)}
@@ -234,7 +249,6 @@ function LogRow({
         {entry.tier && <TierPill tier={entry.tier} />}
       </div>
 
-      {/* GDG map collapsible */}
       {hasGdg && expanded && (
         <pre style={{
           margin: '0 12px 8px',
@@ -255,11 +269,147 @@ function LogRow({
   );
 }
 
+// ─── Start screen ─────────────────────────────────────────────────────────────
+
+function StartScreen() {
+  const [input, setInput] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => { inputRef.current?.focus(); }, []);
+
+  async function handleStart() {
+    const value = input.trim();
+    if (!value || loading) return;
+    setLoading(true);
+    setError(null);
+    try {
+      const result = await callPerceive(value);
+      // Redirect — full navigation so the page re-mounts with the new sessionId
+      window.location.href = `/mirror?session=${encodeURIComponent(result.sessionId)}`;
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unknown error');
+      setLoading(false);
+    }
+  }
+
+  const canSubmit = input.trim().length > 0 && !loading;
+
+  return (
+    <div style={{
+      height: '100vh',
+      display: 'flex',
+      flexDirection: 'column',
+      alignItems: 'center',
+      justifyContent: 'center',
+      background: C.bg,
+      fontFamily: C.font,
+      gap: 0,
+    }}>
+      {/* Logo */}
+      <div style={{ marginBottom: 48, textAlign: 'center' }}>
+        <div style={{ fontSize: 22, fontWeight: 700, color: C.text, letterSpacing: '0.12em' }}>
+          HOLLOW
+        </div>
+        <div style={{ fontSize: 11, color: '#333', marginTop: 6, letterSpacing: '0.06em' }}>
+          PERCEPTION ENGINE
+        </div>
+      </div>
+
+      {/* Input group */}
+      <div style={{
+        display: 'flex',
+        gap: 0,
+        width: '100%',
+        maxWidth: 560,
+        padding: '0 24px',
+        boxSizing: 'border-box' as const,
+      }}>
+        <input
+          ref={inputRef}
+          type="text"
+          value={input}
+          onChange={e => { setInput(e.target.value); setError(null); }}
+          onKeyDown={e => e.key === 'Enter' && handleStart()}
+          placeholder="https://example.com — or paste raw HTML…"
+          disabled={loading}
+          style={{
+            flex: 1,
+            background: '#0f0f0f',
+            border: `1px solid ${error ? '#f87171' : '#2a2a2a'}`,
+            borderRight: 'none',
+            borderRadius: '4px 0 0 4px',
+            color: C.text,
+            fontFamily: C.font,
+            fontSize: 13,
+            padding: '10px 14px',
+            outline: 'none',
+            transition: 'border-color 0.15s',
+          }}
+        />
+        <button
+          onClick={handleStart}
+          disabled={!canSubmit}
+          style={{
+            padding: '10px 20px',
+            background: canSubmit ? C.tealDim : '#0d0d0d',
+            border: `1px solid ${canSubmit ? C.teal : '#1a1a1a'}`,
+            borderRadius: '0 4px 4px 0',
+            color: canSubmit ? '#5eead4' : '#333',
+            fontFamily: C.font,
+            fontSize: 11,
+            fontWeight: 700,
+            letterSpacing: '0.08em',
+            textTransform: 'uppercase' as const,
+            cursor: canSubmit ? 'pointer' : 'default',
+            flexShrink: 0,
+            transition: 'all 0.15s',
+            whiteSpace: 'nowrap' as const,
+          }}
+        >
+          {loading ? 'Starting…' : 'Start Session'}
+        </button>
+      </div>
+
+      {/* Error */}
+      {error && (
+        <div style={{
+          marginTop: 12,
+          padding: '6px 14px',
+          background: '#450a0a',
+          border: '1px solid #7f1d1d',
+          borderRadius: 4,
+          color: '#f87171',
+          fontSize: 11,
+          maxWidth: 512,
+        }}>
+          {error}
+        </div>
+      )}
+
+      {/* Loading hint */}
+      {loading && (
+        <div style={{ marginTop: 16, fontSize: 11, color: '#333', letterSpacing: '0.04em' }}>
+          Perceiving… this may take 5–15 seconds on cold start.
+        </div>
+      )}
+
+      {/* Hint */}
+      {!loading && !error && (
+        <div style={{ marginTop: 16, fontSize: 10, color: '#252525' }}>
+          URL (https://…) or raw HTML accepted · Enter to submit
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── Main component ───────────────────────────────────────────────────────────
 
 export function MatrixMirror({ sessionId }: { sessionId: string | null }) {
   const [status, setStatus] = useState<ConnStatus>('disconnected');
-  const [url, setUrl] = useState<string>('—');
+  const [currentUrl, setCurrentUrl] = useState<string>('—');
   const [confidence, setConfidence] = useState<number | null>(null);
   const [tier, setTier] = useState<Tier | null>(null);
   const [log, setLog] = useState<LogEntry[]>([]);
@@ -269,9 +419,13 @@ export function MatrixMirror({ sessionId }: { sessionId: string | null }) {
   const [intervention, setIntervention] = useState('');
   const [staged, setStaged] = useState<string | null>(null);
 
+  // URL navigation bar state
+  const [navInput, setNavInput] = useState('');
+  const [navLoading, setNavLoading] = useState(false);
+  const [navError, setNavError] = useState<string | null>(null);
+
   const logRef = useRef<HTMLDivElement>(null);
   const iframeRef = useRef<HTMLIFrameElement>(null);
-  const counterRef = useRef(0);
 
   // Auto-scroll log to bottom
   useEffect(() => {
@@ -282,7 +436,6 @@ export function MatrixMirror({ sessionId }: { sessionId: string | null }) {
   // Highlight active element in iframe via postMessage
   useEffect(() => {
     if (activeId === null || !iframeRef.current) return;
-    // Small delay to let iframe script initialise after a dom_delta reload
     const t = setTimeout(() => {
       iframeRef.current?.contentWindow?.postMessage(
         { type: 'hollow:highlight', id: activeId },
@@ -304,11 +457,7 @@ export function MatrixMirror({ sessionId }: { sessionId: string | null }) {
     setStatus('connecting');
     addEntry({ tag: 'SYS', message: `Connecting to session ${sessionId}…`, timestamp: new Date().toISOString() });
 
-    // Track whether any substantive data has arrived via SSE
     let hasData = false;
-
-    // ── Polling fallback ──────────────────────────────────────────────────────
-    // Activated when SSE times out or errors before delivering any events.
     let pollInterval: ReturnType<typeof setInterval> | null = null;
     let lastUpdatedAt = 0;
 
@@ -317,7 +466,7 @@ export function MatrixMirror({ sessionId }: { sessionId: string | null }) {
     }
 
     function startPolling() {
-      if (pollInterval) return; // already running
+      if (pollInterval) return;
       setStatus('polling');
       addEntry({
         tag: 'SYS',
@@ -330,11 +479,11 @@ export function MatrixMirror({ sessionId }: { sessionId: string | null }) {
           const res = await fetch(`/api/session/${sessionId}`);
           if (!res.ok) return;
           const d = await res.json();
-          if (d.updatedAt === lastUpdatedAt) return; // nothing changed
+          if (d.updatedAt === lastUpdatedAt) return;
           lastUpdatedAt = d.updatedAt;
 
           if (d.html) setDomHtml(d.html);
-          if (d.url)  setUrl(d.url);
+          if (d.url)  setCurrentUrl(d.url);
           if (d.confidence !== null && d.confidence !== undefined) setConfidence(d.confidence);
           if (d.tier) setTier(d.tier as Tier);
           if (d.gdgMap) {
@@ -351,10 +500,8 @@ export function MatrixMirror({ sessionId }: { sessionId: string | null }) {
       }, 2000);
     }
 
-    // If no dom_delta arrives within 10 s of connecting, fall back to polling.
     const watchdog = setTimeout(startPolling, 10_000);
 
-    // ── SSE ───────────────────────────────────────────────────────────────────
     const sse = new EventSource(`/api/stream/${sessionId}`);
 
     sse.addEventListener('connect', (e: MessageEvent) => {
@@ -401,7 +548,7 @@ export function MatrixMirror({ sessionId }: { sessionId: string | null }) {
       setStatus('connected');
       const data = JSON.parse(e.data);
       setDomHtml(data.html);
-      if (data.url) setUrl(data.url);
+      if (data.url) setCurrentUrl(data.url);
     });
 
     sse.addEventListener('tier', (e: MessageEvent) => {
@@ -418,8 +565,6 @@ export function MatrixMirror({ sessionId }: { sessionId: string | null }) {
       }
     });
 
-    // Stream self-closes every 55 s in production (poll_timeout).
-    // EventSource reconnects automatically; if polling is active it stays active.
     sse.addEventListener('reconnect', () => {
       if (!pollInterval) setStatus('connecting');
       addEntry({ tag: 'SYS', message: 'Stream cycling — reconnecting…', timestamp: new Date().toISOString() });
@@ -427,7 +572,6 @@ export function MatrixMirror({ sessionId }: { sessionId: string | null }) {
 
     sse.onerror = () => {
       if (!hasData) {
-        // SSE failed before delivering any data — start polling immediately
         clearTimeout(watchdog);
         startPolling();
       } else {
@@ -442,6 +586,25 @@ export function MatrixMirror({ sessionId }: { sessionId: string | null }) {
       sse.close();
     };
   }, [sessionId, addEntry]);
+
+  // ── URL nav bar handler ────────────────────────────────────────────────────
+  async function handleNavigate() {
+    const value = navInput.trim();
+    if (!value || navLoading || !sessionId) return;
+    setNavLoading(true);
+    setNavError(null);
+    addEntry({ tag: 'SYS', message: `Navigating to: ${value}`, timestamp: new Date().toISOString() });
+    try {
+      await callPerceive(value, sessionId);
+      setNavInput('');
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Navigation failed';
+      setNavError(msg);
+      addEntry({ tag: 'ERR', message: `Navigate failed: ${msg}`, timestamp: new Date().toISOString() });
+    } finally {
+      setNavLoading(false);
+    }
+  }
 
   function toggleExpand(id: string) {
     setExpandedIds(prev => {
@@ -465,27 +628,12 @@ export function MatrixMirror({ sessionId }: { sessionId: string | null }) {
     }).catch(() => {});
   }
 
-  // ─── No session state ──────────────────────────────────────────────────────
+  // ─── No session — show start screen ───────────────────────────────────────
   if (!sessionId) {
-    return (
-      <div style={{
-        height: '100vh', display: 'flex', flexDirection: 'column',
-        alignItems: 'center', justifyContent: 'center',
-        background: C.bg, color: C.muted, fontFamily: C.font, gap: 16,
-      }}>
-        <span style={{ fontSize: 13 }}>No session ID.</span>
-        <span style={{ fontSize: 11, color: '#333' }}>
-          Navigate to <code style={{ color: '#555' }}>/mirror?session=&lt;sessionId&gt;</code>
-        </span>
-        <span style={{ fontSize: 11, color: '#2a2a2a', marginTop: 8 }}>
-          Start a session: <code style={{ color: '#333' }}>POST /api/perceive {'{'} url, html {'}'}</code>
-        </span>
-      </div>
-    );
+    return <StartScreen />;
   }
 
-  // ─── Render ────────────────────────────────────────────────────────────────
-  // Strip sess: before slicing so the display stays "sess:89dc67…" not "sess:sess:89d…"
+  // ─── Active mirror ─────────────────────────────────────────────────────────
   const shortSession = sessionId.replace(/^sess:/, '').slice(0, 8) + '…';
 
   return (
@@ -499,34 +647,74 @@ export function MatrixMirror({ sessionId }: { sessionId: string | null }) {
       overflow: 'hidden',
     }}>
 
-      {/* ── Top bar ────────────────────────────────────────────────────────── */}
+      {/* ── Top bar ───────────────────────────────────────────────────────── */}
       <div style={{
         height: 48,
         display: 'flex',
         alignItems: 'center',
-        gap: 16,
-        padding: '0 16px',
+        gap: 10,
+        padding: '0 12px',
         borderBottom: `1px solid ${C.border}`,
         background: C.panel,
         flexShrink: 0,
       }}>
         {/* Logo */}
-        <span style={{ fontSize: 13, fontWeight: 700, color: C.text, letterSpacing: '0.04em', marginRight: 4 }}>
+        <span style={{ fontSize: 13, fontWeight: 700, color: C.text, letterSpacing: '0.04em', flexShrink: 0 }}>
           HOLLOW
         </span>
 
         <span style={{ color: C.border, fontSize: 18, lineHeight: 1 }}>|</span>
 
-        {/* URL */}
-        <span style={{
-          fontSize: 11, color: '#888',
-          maxWidth: 320, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-        }}>
-          {url}
-        </span>
+        {/* URL navigation bar */}
+        <div style={{ display: 'flex', flex: 1, gap: 0, minWidth: 0 }}>
+          <input
+            type="text"
+            value={navInput}
+            onChange={e => { setNavInput(e.target.value); setNavError(null); }}
+            onKeyDown={e => e.key === 'Enter' && handleNavigate()}
+            placeholder={currentUrl === '—' ? 'https://example.com or paste HTML…' : currentUrl}
+            disabled={navLoading}
+            style={{
+              flex: 1,
+              minWidth: 0,
+              background: navError ? '#1a0505' : '#0a0a0a',
+              border: `1px solid ${navError ? '#7f1d1d' : '#1e1e1e'}`,
+              borderRight: 'none',
+              borderRadius: '3px 0 0 3px',
+              color: C.text,
+              fontFamily: C.font,
+              fontSize: 11,
+              padding: '4px 10px',
+              outline: 'none',
+            }}
+          />
+          <button
+            onClick={handleNavigate}
+            disabled={!navInput.trim() || navLoading}
+            style={{
+              padding: '4px 12px',
+              background: navInput.trim() && !navLoading ? C.tealDim : 'transparent',
+              border: `1px solid ${navInput.trim() && !navLoading ? C.teal : '#1e1e1e'}`,
+              borderRadius: '0 3px 3px 0',
+              color: navInput.trim() && !navLoading ? '#5eead4' : '#333',
+              fontFamily: C.font,
+              fontSize: 10,
+              fontWeight: 700,
+              letterSpacing: '0.06em',
+              textTransform: 'uppercase' as const,
+              cursor: navInput.trim() && !navLoading ? 'pointer' : 'default',
+              flexShrink: 0,
+              whiteSpace: 'nowrap' as const,
+            }}
+          >
+            {navLoading ? '…' : 'Go'}
+          </button>
+        </div>
 
-        {/* Session */}
-        <span style={{ fontSize: 10, color: '#444', marginLeft: 'auto' }}>
+        <span style={{ color: C.border, fontSize: 18, lineHeight: 1 }}>|</span>
+
+        {/* Session ID */}
+        <span style={{ fontSize: 10, color: '#444', flexShrink: 0 }}>
           sess:{shortSession}
         </span>
 
@@ -534,7 +722,7 @@ export function MatrixMirror({ sessionId }: { sessionId: string | null }) {
 
         {/* Confidence */}
         {confidence !== null && (
-          <span style={{ fontSize: 12, fontWeight: 700, color: confColor(confidence) }}>
+          <span style={{ fontSize: 12, fontWeight: 700, color: confColor(confidence), flexShrink: 0 }}>
             {confidence.toFixed(2)}
           </span>
         )}
@@ -548,7 +736,7 @@ export function MatrixMirror({ sessionId }: { sessionId: string | null }) {
         <StatusDot status={status} />
       </div>
 
-      {/* ── Main panels ────────────────────────────────────────────────────── */}
+      {/* ── Main panels ───────────────────────────────────────────────────── */}
       <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
 
         {/* Left — Ghost DOM viewer */}
@@ -559,7 +747,6 @@ export function MatrixMirror({ sessionId }: { sessionId: string | null }) {
           flexDirection: 'column',
           flexShrink: 0,
         }}>
-          {/* Panel header */}
           <div style={{
             height: 32,
             display: 'flex',
@@ -577,19 +764,12 @@ export function MatrixMirror({ sessionId }: { sessionId: string | null }) {
             )}
           </div>
 
-          {/* Iframe / empty state */}
-          {/* srcDoc (not src) so content is always inline — never a URL navigation */}
           {domHtml ? (
             <iframe
               ref={iframeRef}
               srcDoc={injectHollowScript(domHtml)}
               sandbox="allow-scripts"
-              style={{
-                flex: 1,
-                border: 'none',
-                background: '#fff',
-                width: '100%',
-              }}
+              style={{ flex: 1, border: 'none', background: '#fff', width: '100%' }}
             />
           ) : (
             <div style={{
@@ -603,21 +783,12 @@ export function MatrixMirror({ sessionId }: { sessionId: string | null }) {
             }}>
               <span style={{ fontSize: 28 }}>◻</span>
               <span style={{ fontSize: 11 }}>Waiting for DOM delta…</span>
-              <span style={{ fontSize: 10, color: '#222' }}>
-                POST /api/perceive to populate
-              </span>
             </div>
           )}
         </div>
 
         {/* Right — Agent log */}
-        <div style={{
-          flex: 1,
-          display: 'flex',
-          flexDirection: 'column',
-          overflow: 'hidden',
-        }}>
-          {/* Panel header */}
+        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
           <div style={{
             height: 32,
             display: 'flex',
@@ -648,15 +819,7 @@ export function MatrixMirror({ sessionId }: { sessionId: string | null }) {
             )}
           </div>
 
-          {/* Scrollable log */}
-          <div
-            ref={logRef}
-            style={{
-              flex: 1,
-              overflowY: 'auto',
-              fontSize: 12,
-            }}
-          >
+          <div ref={logRef} style={{ flex: 1, overflowY: 'auto', fontSize: 12 }}>
             {log.length === 0 ? (
               <div style={{
                 display: 'flex', alignItems: 'center', justifyContent: 'center',
@@ -678,7 +841,7 @@ export function MatrixMirror({ sessionId }: { sessionId: string | null }) {
         </div>
       </div>
 
-      {/* ── Bottom bar — Intervention ───────────────────────────────────────── */}
+      {/* ── Bottom bar — Intervention ──────────────────────────────────────── */}
       <div style={{
         height: 56,
         display: 'flex',
