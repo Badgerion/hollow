@@ -34,8 +34,8 @@ export async function buildDOM(html: string, url: string): Promise<DOMResult> {
   });
 
   // Intercept JS runtime errors → Vitality Monitor
-  window.addEventListener('error', (event: Event) => {
-    const errEvent = event as ErrorEvent;
+  window.addEventListener('error', (event) => {
+    const errEvent = event as unknown as ErrorEvent;
     vitality.capture(
       errEvent.message ?? String(errEvent),
       errEvent.filename,
@@ -45,8 +45,8 @@ export async function buildDOM(html: string, url: string): Promise<DOMResult> {
   });
 
   // Intercept unhandled promise rejections
-  window.addEventListener('unhandledrejection', (event: Event) => {
-    const promiseEvent = event as PromiseRejectionEvent;
+  window.addEventListener('unhandledrejection', (event) => {
+    const promiseEvent = event as unknown as PromiseRejectionEvent;
     const reason = promiseEvent.reason;
     const message =
       reason instanceof Error
