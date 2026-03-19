@@ -10,7 +10,7 @@
     "test:perceive": "tsx scripts/test-perceive.ts"
   },
   "dependencies": {
-    "@vercel/kv": "^2.0.0",
+    "@upstash/redis": "^1.37.0",
     "got-scraping": "^4.0.4",
     "happy-dom": "^14.12.0",
     "next": "^14.2.0",

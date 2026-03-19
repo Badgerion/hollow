@@ -1,14 +1,15 @@
 /**
  * Session store — persists DOM state (serialized HTML) between pipeline steps.
  *
- * Production: Vercel KV (Upstash Redis under the hood).
- * Local development: in-memory Map (no KV credentials needed).
+ * Production: Upstash Redis via @upstash/redis (KV_REST_API_URL + KV_REST_API_TOKEN).
+ * Local development: in-memory Map (no Redis credentials needed).
  *
  * The session model: each step loads state → processes → serializes → terminates.
  * Zero idle cost between steps.
  */
 
 import type { SessionState } from './types';
+import { getRedis, hasRedis } from './redis';
 
 const SESSION_TTL = parseInt(process.env.SESSION_TTL_SECONDS ?? '3600', 10);
 
@@ -20,31 +21,32 @@ if (!g.__hollowMemStore) g.__hollowMemStore = new Map<string, string>();
 const memStore = g.__hollowMemStore;
 
 async function kvGet(key: string): Promise<string | null> {
+  if (!hasRedis()) return memStore.get(key) ?? null;
   try {
-    const { kv } = await import('@vercel/kv');
-    return await kv.get<string>(key);
+    return await getRedis().get<string>(key);
   } catch {
     return memStore.get(key) ?? null;
   }
 }
 
 async function kvSet(key: string, value: string, ttl: number): Promise<void> {
-  try {
-    const { kv } = await import('@vercel/kv');
-    await kv.set(key, value, { ex: ttl });
+  if (!hasRedis()) {
+    memStore.set(key, value);
+    setTimeout(() => memStore.delete(key), ttl * 1000);
     return;
+  }
+  try {
+    await getRedis().set(key, value, { ex: ttl });
   } catch {
     memStore.set(key, value);
-    // In-memory doesn't auto-expire; clean up after TTL
     setTimeout(() => memStore.delete(key), ttl * 1000);
   }
 }
 
 async function kvDelete(key: string): Promise<void> {
+  if (!hasRedis()) { memStore.delete(key); return; }
   try {
-    const { kv } = await import('@vercel/kv');
-    await kv.del(key);
-    return;
+    await getRedis().del(key);
   } catch {
     memStore.delete(key);
   }

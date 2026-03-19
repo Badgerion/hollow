@@ -21,6 +21,7 @@ export const maxDuration = 60; // Vercel limit; stream self-closes at 55 s
 
 import { NextRequest } from 'next/server';
 import { loadSession } from '@/lib/hollow/session';
+import { getRedis } from '@/lib/hollow/redis';
 import {
   subscribeLocal,
   useRedis,
@@ -103,15 +104,15 @@ async function pollRedis(
   sessionId: string,
   signal: AbortSignal
 ): Promise<void> {
-  const { kv } = await import('@vercel/kv');
+  const redis = getRedis();
   const key = EVENTS_KEY(sessionId);
   let cursor = 0;
   const deadline = Date.now() + MAX_STREAM_MS;
 
   while (!signal.aborted && Date.now() < deadline) {
     try {
-      // kv auto-parses JSON on read, so items come back as QueuedEvent objects
-      const items = await kv.lrange<QueuedEvent>(key, cursor, -1);
+      // @upstash/redis auto-parses JSON on read; items come back as QueuedEvent objects
+      const items = await redis.lrange<QueuedEvent>(key, cursor, -1);
       if (items.length > 0) {
         cursor += items.length;
         for (const { event, data } of items) {

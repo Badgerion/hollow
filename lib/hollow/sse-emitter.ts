@@ -6,7 +6,7 @@
  *   Production (KV_REST_API_URL + KV_REST_API_TOKEN set):
  *     emit()  → RPUSH hollow:events:{sessionId}   (fire-and-forget)
  *     stream  → LRANGE polling loop with a per-connection cursor
- *     Uses the same @vercel/kv instance as session storage — no extra DB.
+ *     Uses the same Upstash Redis instance as session storage — no extra DB.
  *     Works correctly across separate serverless function instances.
  *
  *   Local dev (no KV env vars):
@@ -30,9 +30,8 @@ export const EVENTS_KEY = (sessionId: string) => `hollow:events:${sessionId}`;
 const EVENTS_TTL_S = 3600;
 
 // True when Upstash Redis credentials are available
-export function useRedis(): boolean {
-  return !!(process.env.KV_REST_API_URL && process.env.KV_REST_API_TOKEN);
-}
+import { hasRedis, getRedis } from './redis';
+export { hasRedis as useRedis } from './redis';
 
 // ── In-process emitter (local dev) ────────────────────────────────────────────
 
@@ -73,11 +72,11 @@ function localEmitter(): InProcessEmitter {
 // ── Redis publish (production) ─────────────────────────────────────────────────
 
 async function redisPublish(sessionId: string, event: string, data: unknown): Promise<void> {
-  const { kv } = await import('@vercel/kv');
+  const redis = getRedis();
   const payload: QueuedEvent = { event, data, ts: Date.now() };
-  // @vercel/kv auto-serialises objects to JSON on write, auto-parses on read
-  await kv.rpush(EVENTS_KEY(sessionId), payload);
-  await kv.expire(EVENTS_KEY(sessionId), EVENTS_TTL_S);
+  // @upstash/redis auto-serialises objects to JSON on write, auto-parses on read
+  await redis.rpush(EVENTS_KEY(sessionId), payload);
+  await redis.expire(EVENTS_KEY(sessionId), EVENTS_TTL_S);
 }
 
 // ── Public API ─────────────────────────────────────────────────────────────────
@@ -90,7 +89,7 @@ async function redisPublish(sessionId: string, event: string, data: unknown): Pr
 export function getEmitter() {
   return {
     emit(sessionId: string, event: string, data: unknown): void {
-      if (useRedis()) {
+      if (hasRedis()) {
         // Fire-and-forget — pipeline doesn't block on network I/O.
         // Events land in Redis; the stream route picks them up on the next poll.
         redisPublish(sessionId, event, data).catch(err =>

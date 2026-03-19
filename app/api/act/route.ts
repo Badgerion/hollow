@@ -83,13 +83,13 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
       if (action.type === 'fill' && action.value !== undefined) {
         (target as unknown as HTMLInputElement).value = action.value;
-        target.dispatchEvent(new window.Event('input', { bubbles: true }));
-        target.dispatchEvent(new window.Event('change', { bubbles: true }));
+        target.dispatchEvent(new (window.Event as unknown as typeof Event)('input', { bubbles: true }));
+        target.dispatchEvent(new (window.Event as unknown as typeof Event)('change', { bubbles: true }));
       } else if (action.type === 'click') {
         target.click();
       } else if (action.type === 'select' && action.value !== undefined) {
         (target as unknown as HTMLSelectElement).value = action.value;
-        target.dispatchEvent(new window.Event('change', { bubbles: true }));
+        target.dispatchEvent(new (window.Event as unknown as typeof Event)('change', { bubbles: true }));
       }
 
       // Wait for any JS reactions
