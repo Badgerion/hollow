@@ -279,13 +279,6 @@ export function MatrixMirror({ sessionId }: { sessionId: string | null }) {
     if (el) el.scrollTop = el.scrollHeight;
   }, [log]);
 
-  // Update Ghost DOM iframe
-  useEffect(() => {
-    const iframe = iframeRef.current;
-    if (!iframe || !domHtml) return;
-    iframe.srcdoc = injectHollowScript(domHtml);
-  }, [domHtml]);
-
   // Highlight active element in iframe via postMessage
   useEffect(() => {
     if (activeId === null || !iframeRef.current) return;
@@ -492,7 +485,8 @@ export function MatrixMirror({ sessionId }: { sessionId: string | null }) {
   }
 
   // ─── Render ────────────────────────────────────────────────────────────────
-  const shortSession = sessionId.slice(0, 8) + '…';
+  // Strip sess: before slicing so the display stays "sess:89dc67…" not "sess:sess:89d…"
+  const shortSession = sessionId.replace(/^sess:/, '').slice(0, 8) + '…';
 
   return (
     <div style={{
@@ -584,9 +578,11 @@ export function MatrixMirror({ sessionId }: { sessionId: string | null }) {
           </div>
 
           {/* Iframe / empty state */}
+          {/* srcDoc (not src) so content is always inline — never a URL navigation */}
           {domHtml ? (
             <iframe
               ref={iframeRef}
+              srcDoc={injectHollowScript(domHtml)}
               sandbox="allow-scripts"
               style={{
                 flex: 1,
