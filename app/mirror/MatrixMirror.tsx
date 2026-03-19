@@ -6,7 +6,7 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 
 type LogTag = 'SYS' | 'GDG' | 'AI' | 'ACT' | 'OK' | 'WARN' | 'ERR';
 type Tier = 'hollow' | 'baas';
-type ConnStatus = 'disconnected' | 'connecting' | 'connected' | 'error';
+type ConnStatus = 'disconnected' | 'connecting' | 'connected' | 'polling' | 'error';
 
 interface LogEntry {
   id: string;
@@ -119,13 +119,22 @@ function injectHollowScript(html: string): string {
 // ─── Sub-components ───────────────────────────────────────────────────────────
 
 function StatusDot({ status }: { status: ConnStatus }) {
-  const color = status === 'connected' ? '#4ade80' : status === 'connecting' ? '#fbbf24' : status === 'error' ? '#f87171' : '#555';
-  const label = status === 'connected' ? 'CONNECTED' : status === 'connecting' ? 'CONNECTING' : status === 'error' ? 'ERROR' : 'DISCONNECTED';
+  const color = status === 'connected' ? '#4ade80'
+    : status === 'connecting' ? '#fbbf24'
+    : status === 'polling'    ? '#60a5fa'
+    : status === 'error'      ? '#f87171'
+    : '#555';
+  const label = status === 'connected' ? 'CONNECTED'
+    : status === 'connecting' ? 'CONNECTING'
+    : status === 'polling'    ? 'POLLING'
+    : status === 'error'      ? 'ERROR'
+    : 'DISCONNECTED';
+  const glow = status === 'connected' || status === 'polling';
   return (
     <span style={{ display: 'flex', alignItems: 'center', gap: '5px', fontSize: '10px', color: '#888' }}>
       <span style={{
         width: 7, height: 7, borderRadius: '50%', background: color, flexShrink: 0,
-        boxShadow: status === 'connected' ? `0 0 6px ${color}` : 'none',
+        boxShadow: glow ? `0 0 6px ${color}` : 'none',
       }} />
       {label}
     </span>
@@ -295,13 +304,64 @@ export function MatrixMirror({ sessionId }: { sessionId: string | null }) {
     setLog(prev => [...prev, { id, ...entry }]);
   }, []);
 
-  // SSE connection
+  // SSE connection + polling fallback
   useEffect(() => {
     if (!sessionId) return;
 
     setStatus('connecting');
     addEntry({ tag: 'SYS', message: `Connecting to session ${sessionId}…`, timestamp: new Date().toISOString() });
 
+    // Track whether any substantive data has arrived via SSE
+    let hasData = false;
+
+    // ── Polling fallback ──────────────────────────────────────────────────────
+    // Activated when SSE times out or errors before delivering any events.
+    let pollInterval: ReturnType<typeof setInterval> | null = null;
+    let lastUpdatedAt = 0;
+
+    function stopPolling() {
+      if (pollInterval) { clearInterval(pollInterval); pollInterval = null; }
+    }
+
+    function startPolling() {
+      if (pollInterval) return; // already running
+      setStatus('polling');
+      addEntry({
+        tag: 'SYS',
+        message: 'SSE unavailable on this tier — switching to 2s polling fallback.',
+        timestamp: new Date().toISOString(),
+      });
+
+      pollInterval = setInterval(async () => {
+        try {
+          const res = await fetch(`/api/session/${sessionId}`);
+          if (!res.ok) return;
+          const d = await res.json();
+          if (d.updatedAt === lastUpdatedAt) return; // nothing changed
+          lastUpdatedAt = d.updatedAt;
+
+          if (d.html) setDomHtml(d.html);
+          if (d.url)  setUrl(d.url);
+          if (d.confidence !== null && d.confidence !== undefined) setConfidence(d.confidence);
+          if (d.tier) setTier(d.tier as Tier);
+          if (d.gdgMap) {
+            addEntry({
+              tag: 'GDG',
+              message: `Perception map updated (step ${d.stepCount}). ${d.tokenEstimate ?? '?'} tokens. Confidence: ${d.confidence?.toFixed(2) ?? '?'}. Tier: ${d.tier ?? '?'}.`,
+              timestamp: new Date().toISOString(),
+              gdgMap: d.gdgMap,
+              confidence: d.confidence,
+              tier: d.tier as Tier,
+            });
+          }
+        } catch { /* transient network error — retry next tick */ }
+      }, 2000);
+    }
+
+    // If no dom_delta arrives within 10 s of connecting, fall back to polling.
+    const watchdog = setTimeout(startPolling, 10_000);
+
+    // ── SSE ───────────────────────────────────────────────────────────────────
     const sse = new EventSource(`/api/stream/${sessionId}`);
 
     sse.addEventListener('connect', (e: MessageEvent) => {
@@ -319,6 +379,9 @@ export function MatrixMirror({ sessionId }: { sessionId: string | null }) {
     });
 
     sse.addEventListener('gdg_map', (e: MessageEvent) => {
+      clearTimeout(watchdog);
+      stopPolling();
+      hasData = true;
       const data = JSON.parse(e.data);
       if (data.confidence !== undefined) setConfidence(data.confidence);
       if (data.tier) setTier(data.tier as Tier);
@@ -339,6 +402,10 @@ export function MatrixMirror({ sessionId }: { sessionId: string | null }) {
     });
 
     sse.addEventListener('dom_delta', (e: MessageEvent) => {
+      clearTimeout(watchdog);
+      stopPolling();
+      hasData = true;
+      setStatus('connected');
       const data = JSON.parse(e.data);
       setDomHtml(data.html);
       if (data.url) setUrl(data.url);
@@ -359,18 +426,28 @@ export function MatrixMirror({ sessionId }: { sessionId: string | null }) {
     });
 
     // Stream self-closes every 55 s in production (poll_timeout).
-    // EventSource will reconnect automatically — just log it.
+    // EventSource reconnects automatically; if polling is active it stays active.
     sse.addEventListener('reconnect', () => {
-      setStatus('connecting');
+      if (!pollInterval) setStatus('connecting');
       addEntry({ tag: 'SYS', message: 'Stream cycling — reconnecting…', timestamp: new Date().toISOString() });
     });
 
     sse.onerror = () => {
-      setStatus('error');
-      addEntry({ tag: 'ERR', message: 'SSE connection lost.', timestamp: new Date().toISOString() });
+      if (!hasData) {
+        // SSE failed before delivering any data — start polling immediately
+        clearTimeout(watchdog);
+        startPolling();
+      } else {
+        setStatus('error');
+        addEntry({ tag: 'ERR', message: 'SSE connection lost.', timestamp: new Date().toISOString() });
+      }
     };
 
-    return () => sse.close();
+    return () => {
+      clearTimeout(watchdog);
+      stopPolling();
+      sse.close();
+    };
   }, [sessionId, addEntry]);
 
   function toggleExpand(id: string) {

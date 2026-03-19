@@ -1,29 +1,35 @@
 /**
- * DELETE /api/session/:sessionId
+ * GET /api/session/:sessionId
  *
- * Clears DOM state from the KV store. Terminates the session.
+ * Returns the current session state including the last perceive result.
+ * Used by the Mirror polling fallback when SSE is unavailable (Hobby tier).
  */
 
 export const runtime = 'nodejs';
 
 import { NextRequest, NextResponse } from 'next/server';
-import { deleteSession, loadSession } from '@/lib/hollow/session';
+import { loadSession } from '@/lib/hollow/session';
 
-export async function DELETE(
+export async function GET(
   _req: NextRequest,
   { params }: { params: { sessionId: string } }
 ): Promise<NextResponse> {
   const { sessionId } = params;
-
   const session = await loadSession(sessionId);
+
   if (!session) {
-    return NextResponse.json(
-      { error: `Session ${sessionId} not found` },
-      { status: 404 }
-    );
+    return NextResponse.json({ error: 'Session not found' }, { status: 404 });
   }
 
-  await deleteSession(sessionId);
-
-  return NextResponse.json({ deleted: true, sessionId }, { status: 200 });
+  return NextResponse.json({
+    sessionId:     session.sessionId,
+    url:           session.url,
+    html:          session.html,
+    gdgMap:        session.gdgMap        ?? null,
+    confidence:    session.confidence    ?? null,
+    tier:          session.tier          ?? null,
+    tokenEstimate: session.tokenEstimate ?? null,
+    stepCount:     session.stepCount,
+    updatedAt:     session.updatedAt,
+  });
 }

@@ -124,6 +124,11 @@ export interface SessionState {
   createdAt: number;
   updatedAt: number;
   stepCount: number;
+  // Snapshot of the last perceive result — used by the polling fallback endpoint
+  gdgMap?: string;
+  confidence?: number;
+  tier?: 'hollow' | 'baas';
+  tokenEstimate?: number;
 }
 
 // ─── Pipeline Result ─────────────────────────────────────────────────────────

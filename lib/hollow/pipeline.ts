@@ -24,7 +24,7 @@ import { generateGDGSpatial } from './gdg-spatial';
 import { scoreConfidence } from './confidence';
 import { loadSession, saveSession, newSession, bumpSession } from './session';
 import { getEmitter } from './sse-emitter';
-import type { HollowPerceiveResult, PerceiveRequest } from './types';
+import type { HollowPerceiveResult, PerceiveRequest, SessionState } from './types';
 import type { LayoutBox } from './yoga-layout';
 
 export async function perceive(req: PerceiveRequest): Promise<HollowPerceiveResult> {
@@ -145,9 +145,16 @@ export async function perceive(req: PerceiveRequest): Promise<HollowPerceiveResu
   // ── Step 8: Session persistence ──────────────────────────────────────────────
   const liveHtml = document.documentElement?.outerHTML ?? html;
 
-  const sessionState = existingSession
-    ? bumpSession(existingSession, liveHtml)
-    : newSession(sessionId, finalUrl, liveHtml);
+  const sessionState: SessionState = {
+    ...(existingSession
+      ? bumpSession(existingSession, liveHtml)
+      : newSession(sessionId, finalUrl, liveHtml)),
+    // Persist last perceive result so the polling fallback endpoint can serve it
+    gdgMap: gdg.map,
+    confidence,
+    tier,
+    tokenEstimate: gdg.tokenEstimate,
+  };
 
   await saveSession(sessionState);
   window.happyDOM.close();
