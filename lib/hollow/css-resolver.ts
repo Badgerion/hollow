@@ -89,7 +89,7 @@ export function resolveStyles(el: Element, win: Window): ComputedStyles {
   let computed: CSSStyleDeclaration | null = null;
 
   try {
-    computed = win.getComputedStyle(el as unknown as globalThis.Element) as unknown as CSSStyleDeclaration;
+    computed = win.getComputedStyle(el as unknown as Parameters<typeof win.getComputedStyle>[0]) as unknown as CSSStyleDeclaration;
   } catch {
     // Happy DOM may throw on certain element types; fall through to inline
   }
