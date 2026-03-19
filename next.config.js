@@ -4,7 +4,7 @@ const nextConfig = {
     // Prevent bundling of Node.js-only modules for the client (Next.js 14 API)
     serverComponentsExternalPackages: [
       'happy-dom',
-      'yoga-layout-prebuilt',
+      'yoga-layout',
       'got-scraping',       // ESM-only; its browserslist/header-generator deps
       'header-generator',  // trigger "cannot statically extract" warnings when
       'browserslist',      // webpack bundles them — exclude the whole chain

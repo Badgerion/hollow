@@ -31,13 +31,17 @@ async function kvGet(key: string): Promise<string | null> {
 
 async function kvSet(key: string, value: string, ttl: number): Promise<void> {
   if (!hasRedis()) {
+    console.log(`[hollow/session] kvSet key=${key} → memStore (no Redis)`);
     memStore.set(key, value);
     setTimeout(() => memStore.delete(key), ttl * 1000);
     return;
   }
+  console.log(`[hollow/session] kvSet key=${key} → Redis SET ex=${ttl}`);
   try {
     await getRedis().set(key, value, { ex: ttl });
-  } catch {
+    console.log(`[hollow/session] kvSet key=${key} → Redis OK`);
+  } catch (err) {
+    console.error(`[hollow/session] kvSet key=${key} → Redis FAILED, falling back to memStore`, err);
     memStore.set(key, value);
     setTimeout(() => memStore.delete(key), ttl * 1000);
   }

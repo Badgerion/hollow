@@ -17,7 +17,7 @@
     "react": "^18.3.0",
     "react-dom": "^18.3.0",
     "uuid": "^10.0.0",
-    "yoga-layout-prebuilt": "^1.10.0"
+    "yoga-layout": "^3.2.1"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",

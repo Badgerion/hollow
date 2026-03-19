@@ -1,28 +1,33 @@
 /**
  * Shared Upstash Redis client factory.
  *
- * Uses KV_REST_API_URL / KV_REST_API_TOKEN — the same env vars that were
- * injected by the former @vercel/kv integration, so .env.example is unchanged.
+ * Supports both Vercel KV env var names (KV_REST_API_URL / KV_REST_API_TOKEN)
+ * and standalone Upstash names (UPSTASH_REDIS_REST_URL / UPSTASH_REDIS_REST_TOKEN).
  *
- * The client is cached on globalThis so all Next.js per-route webpack chunks
- * share one instance rather than constructing one per request.
+ * No globalThis caching — each call creates a fresh client so serverless cold
+ * starts always pick up the live env vars (caching can capture empty credentials
+ * set before the env vars are injected by the platform).
  */
 
 import { Redis } from '@upstash/redis';
 
-const g = global as typeof globalThis & { __hollowRedis?: Redis };
-
 export function getRedis(): Redis {
-  if (!g.__hollowRedis) {
-    g.__hollowRedis = new Redis({
-      url:   process.env.KV_REST_API_URL   ?? '',
-      token: process.env.KV_REST_API_TOKEN ?? '',
-    });
-  }
-  return g.__hollowRedis;
+  const url =
+    process.env.KV_REST_API_URL ||
+    process.env.UPSTASH_REDIS_REST_URL ||
+    '';
+  const token =
+    process.env.KV_REST_API_TOKEN ||
+    process.env.UPSTASH_REDIS_REST_TOKEN ||
+    '';
+  console.log(`[hollow/redis] getRedis url=${!!url} token=${!!token}`);
+  return new Redis({ url, token });
 }
 
 /** True when Redis credentials are present in the environment. */
 export function hasRedis(): boolean {
-  return !!(process.env.KV_REST_API_URL && process.env.KV_REST_API_TOKEN);
+  return !!(
+    (process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL) &&
+    (process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN)
+  );
 }

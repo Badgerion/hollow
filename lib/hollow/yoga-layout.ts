@@ -1,24 +1,14 @@
 /**
  * Yoga layout engine — computes Flexbox X/Y/W/H for every DOM element.
  *
- * Uses yoga-layout-prebuilt (pre-compiled, synchronous, no async init needed).
+ * Uses yoga-layout (pure ESM, WASM-backed). The module uses top-level await
+ * internally and cannot be require()'d — we load it once via dynamic import()
+ * and cache the ready instance on globalThis so all serverless invocations
+ * within the same warm container share one initialised copy.
+ *
  * Maps computed CSS styles → Yoga node properties, builds the parent-child
  * tree, calls calculateLayout(), extracts the coordinate map.
  */
-
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const Yoga = require('yoga-layout-prebuilt');
-
-// Module-level health check — runs once on cold start.
-// yoga-layout-prebuilt is precompiled JS (no WASM binary), so init is synchronous.
-// This verifies the module loaded and Node.create() is callable.
-try {
-  const _probe = Yoga.Node.create();
-  _probe.free();
-  console.log('[hollow/yoga] Yoga loaded OK — Node.create() functional');
-} catch (err) {
-  console.error('[hollow/yoga] Yoga failed to initialise:', err);
-}
 
 import type { Window } from 'happy-dom';
 import { isLayoutElement } from './dom';
@@ -40,9 +30,26 @@ export interface YogaResult {
 const VIEWPORT_WIDTH = parseInt(process.env.HOLLOW_VIEWPORT_WIDTH ?? '1280', 10);
 const VIEWPORT_HEIGHT = parseInt(process.env.HOLLOW_VIEWPORT_HEIGHT ?? '800', 10);
 
+// ─── Yoga async init ──────────────────────────────────────────────────────────
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type YogaModule = any;
+
+const g = global as typeof globalThis & { __hollowYoga?: YogaModule };
+
+async function getYoga(): Promise<YogaModule> {
+  if (g.__hollowYoga) return g.__hollowYoga;
+  console.log('[hollow/yoga] init start — loading yoga-layout WASM');
+  const mod = await import('yoga-layout');
+  const Yoga = mod.default;
+  g.__hollowYoga = Yoga;
+  console.log('[hollow/yoga] init complete');
+  return Yoga;
+}
+
 // ─── Yoga constant helpers ────────────────────────────────────────────────────
 
-function flexDirection(val: string): number {
+function flexDirection(Yoga: YogaModule, val: string): number {
   switch (val) {
     case 'row': return Yoga.FLEX_DIRECTION_ROW;
     case 'row-reverse': return Yoga.FLEX_DIRECTION_ROW_REVERSE;
@@ -52,7 +59,7 @@ function flexDirection(val: string): number {
   }
 }
 
-function justifyContent(val: string): number {
+function justifyContent(Yoga: YogaModule, val: string): number {
   switch (val) {
     case 'flex-start': case 'start': return Yoga.JUSTIFY_FLEX_START;
     case 'center': return Yoga.JUSTIFY_CENTER;
@@ -64,7 +71,7 @@ function justifyContent(val: string): number {
   }
 }
 
-function alignItems(val: string): number {
+function alignItems(Yoga: YogaModule, val: string): number {
   switch (val) {
     case 'flex-start': case 'start': return Yoga.ALIGN_FLEX_START;
     case 'center': return Yoga.ALIGN_CENTER;
@@ -75,7 +82,7 @@ function alignItems(val: string): number {
   }
 }
 
-function alignContent(val: string): number {
+function alignContent(Yoga: YogaModule, val: string): number {
   switch (val) {
     case 'flex-start': case 'start': return Yoga.ALIGN_FLEX_START;
     case 'center': return Yoga.ALIGN_CENTER;
@@ -87,7 +94,7 @@ function alignContent(val: string): number {
   }
 }
 
-function flexWrap(val: string): number {
+function flexWrap(Yoga: YogaModule, val: string): number {
   switch (val) {
     case 'wrap': return Yoga.WRAP_WRAP;
     case 'wrap-reverse': return Yoga.WRAP_WRAP_REVERSE;
@@ -95,12 +102,12 @@ function flexWrap(val: string): number {
   }
 }
 
-function positionType(val: string): number {
+function positionType(Yoga: YogaModule, val: string): number {
   if (val === 'absolute' || val === 'fixed') return Yoga.POSITION_TYPE_ABSOLUTE;
   return Yoga.POSITION_TYPE_RELATIVE;
 }
 
-function overflow(val: string): number {
+function overflow(Yoga: YogaModule, val: string): number {
   switch (val) {
     case 'hidden': return Yoga.OVERFLOW_HIDDEN;
     case 'scroll': return Yoga.OVERFLOW_SCROLL;
@@ -110,19 +117,20 @@ function overflow(val: string): number {
 
 // ─── Apply styles to a Yoga node ─────────────────────────────────────────────
 
-function applyStyles(node: ReturnType<typeof Yoga.Node.create>, styles: ComputedStyles): void {
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function applyStyles(Yoga: YogaModule, node: any, styles: ComputedStyles): void {
   // Display / position
-  node.setPositionType(positionType(styles.position));
-  node.setOverflow(overflow(styles.overflow));
+  node.setPositionType(positionType(Yoga, styles.position));
+  node.setOverflow(overflow(Yoga, styles.overflow));
 
   // Flexbox container properties
   const isFlexContainer = styles.display === 'flex' || styles.display === 'inline-flex';
   if (isFlexContainer) {
-    node.setFlexDirection(flexDirection(styles.flexDirection));
-    node.setJustifyContent(justifyContent(styles.justifyContent));
-    node.setAlignItems(alignItems(styles.alignItems));
-    node.setAlignContent(alignContent(styles.alignContent));
-    node.setFlexWrap(flexWrap(styles.flexWrap));
+    node.setFlexDirection(flexDirection(Yoga, styles.flexDirection));
+    node.setJustifyContent(justifyContent(Yoga, styles.justifyContent));
+    node.setAlignItems(alignItems(Yoga, styles.alignItems));
+    node.setAlignContent(alignContent(Yoga, styles.alignContent));
+    node.setFlexWrap(flexWrap(Yoga, styles.flexWrap));
   }
 
   // Flex item properties
@@ -137,7 +145,7 @@ function applyStyles(node: ReturnType<typeof Yoga.Node.create>, styles: Computed
     if (!isNaN(fb) && fb > 0) node.setFlexBasis(fb);
   }
 
-  // Width
+  // Width / Height
   applyDimension(node, 'width', styles.width);
   applyDimension(node, 'height', styles.height);
   applyDimension(node, 'minWidth', styles.minWidth);
@@ -176,11 +184,8 @@ function applyStyles(node: ReturnType<typeof Yoga.Node.create>, styles: Computed
   }
 }
 
-function applyDimension(
-  node: ReturnType<typeof Yoga.Node.create>,
-  dim: 'width' | 'height' | 'minWidth' | 'maxWidth' | 'minHeight' | 'maxHeight',
-  value: string
-): void {
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function applyDimension(node: any, dim: string, value: string): void {
   if (!value || value === 'auto' || value === 'none') return;
 
   if (value.endsWith('%')) {
@@ -214,13 +219,16 @@ function applyDimension(
 
 interface NodeEntry {
   el: Element;
-  yogaNode: ReturnType<typeof Yoga.Node.create>;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  yogaNode: any;
   styles: ComputedStyles;
 }
 
 function buildYogaTree(
+  Yoga: YogaModule,
   el: Element,
-  parentNode: ReturnType<typeof Yoga.Node.create>,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  parentNode: any,
   parentIndex: number,
   win: Window,
   nodeMap: Map<Element, NodeEntry>,
@@ -236,7 +244,7 @@ function buildYogaTree(
   const node = Yoga.Node.create();
 
   try {
-    applyStyles(node, styles);
+    applyStyles(Yoga, node, styles);
   } catch {
     // If Yoga rejects a value, continue with defaults
   }
@@ -274,7 +282,7 @@ function buildYogaTree(
   if (!isGridContainer) {
     let childIndex = 0;
     for (const child of Array.from(el.children)) {
-      buildYogaTree(child, node, childIndex, win, nodeMap, deductions);
+      buildYogaTree(Yoga, child, node, childIndex, win, nodeMap, deductions);
       childIndex++;
     }
   }
@@ -338,6 +346,7 @@ export async function calculateSubtreeLayout(
   layoutMap: Map<Element, LayoutBox>,
   deductions: ConfidenceDeduction[]
 ): Promise<void> {
+  const Yoga = await getYoga();
   const nodeMap = new Map<Element, NodeEntry>();
 
   // Root sized to the grid cell's box
@@ -348,7 +357,7 @@ export async function calculateSubtreeLayout(
 
   let childIndex = 0;
   for (const child of Array.from(el.children)) {
-    buildYogaTree(child, root, childIndex, win, nodeMap, deductions);
+    buildYogaTree(Yoga, child, root, childIndex, win, nodeMap, deductions);
     childIndex++;
   }
 
@@ -365,6 +374,7 @@ export async function calculateSubtreeLayout(
 // ─── Main entry point ─────────────────────────────────────────────────────────
 
 export async function calculateLayout(body: Element, win: Window): Promise<YogaResult> {
+  const Yoga = await getYoga();
   const nodeMap = new Map<Element, NodeEntry>();
   const deductions: ConfidenceDeduction[] = [];
 
@@ -378,7 +388,7 @@ export async function calculateLayout(body: Element, win: Window): Promise<YogaR
 
   let childIndex = 0;
   for (const child of Array.from(body.children)) {
-    buildYogaTree(child, root, childIndex, win, nodeMap, deductions);
+    buildYogaTree(Yoga, child, root, childIndex, win, nodeMap, deductions);
     childIndex++;
   }
 
