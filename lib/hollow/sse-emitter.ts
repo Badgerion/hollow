@@ -73,10 +73,13 @@ function localEmitter(): InProcessEmitter {
 
 async function redisPublish(sessionId: string, event: string, data: unknown): Promise<void> {
   const redis = getRedis();
+  const key = EVENTS_KEY(sessionId);
   const payload: QueuedEvent = { event, data, ts: Date.now() };
+  // RPUSH returns the new list length — use it for free instead of a second LLEN call
   // @upstash/redis auto-serialises objects to JSON on write, auto-parses on read
-  await redis.rpush(EVENTS_KEY(sessionId), payload);
-  await redis.expire(EVENTS_KEY(sessionId), EVENTS_TTL_S);
+  const listLen = await redis.rpush(key, payload);
+  await redis.expire(key, EVENTS_TTL_S);
+  console.log(`[hollow/sse] publish event="${event}" key=${key} list-length=${listLen}`);
 }
 
 // ── Public API ─────────────────────────────────────────────────────────────────

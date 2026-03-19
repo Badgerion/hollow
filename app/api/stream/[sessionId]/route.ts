@@ -31,8 +31,9 @@ import {
 
 // Close a few seconds before Vercel would hard-kill the function, so the
 // client receives a clean `reconnect` event instead of a broken connection.
-const MAX_STREAM_MS    = 55_000;
-const POLL_INTERVAL_MS =    400;
+const MAX_STREAM_MS       = 55_000;
+const POLL_INTERVAL_MS    =    400;
+const HEARTBEAT_INTERVAL_MS = 5_000;
 
 export async function GET(
   _req: NextRequest,
@@ -107,7 +108,10 @@ async function pollRedis(
   const redis = getRedis();
   const key = EVENTS_KEY(sessionId);
   let cursor = 0;
+  let lastHeartbeat = Date.now();
   const deadline = Date.now() + MAX_STREAM_MS;
+
+  console.log(`[hollow/stream] start polling key=${key} cursor=${cursor}`);
 
   while (!signal.aborted && Date.now() < deadline) {
     try {
@@ -115,12 +119,21 @@ async function pollRedis(
       const items = await redis.lrange<QueuedEvent>(key, cursor, -1);
       if (items.length > 0) {
         cursor += items.length;
+        console.log(`[hollow/stream] key=${key} dispatching ${items.length} event(s) cursor=${cursor}`);
         for (const { event, data } of items) {
           controller.enqueue(encoder.encode(formatSSE(event, data)));
         }
       }
     } catch (err) {
       console.error('[hollow/stream] poll error:', err);
+    }
+
+    // SSE comment keeps the connection alive through Vercel edge / proxy timeouts
+    if (Date.now() - lastHeartbeat >= HEARTBEAT_INTERVAL_MS) {
+      try {
+        controller.enqueue(encoder.encode(': heartbeat\n\n'));
+        lastHeartbeat = Date.now();
+      } catch { /* connection already closed by client */ }
     }
 
     await sleep(POLL_INTERVAL_MS);
