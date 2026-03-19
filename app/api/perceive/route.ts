@@ -7,7 +7,7 @@
  */
 
 export const runtime = 'nodejs';
-export const maxDuration = 30;
+export const maxDuration = 60;
 
 import { NextRequest, NextResponse } from 'next/server';
 import { perceive } from '@/lib/hollow/pipeline';
