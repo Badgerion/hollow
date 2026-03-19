@@ -347,7 +347,25 @@ export async function calculateLayout(body: Element, win: Window): Promise<YogaR
   root.setHeight(VIEWPORT_HEIGHT);
   root.setFlexDirection(Yoga.FLEX_DIRECTION_COLUMN);
 
+  console.log(`[hollow/yoga] VIEWPORT_WIDTH=${VIEWPORT_WIDTH} VIEWPORT_HEIGHT=${VIEWPORT_HEIGHT}`);
   console.log(`[hollow/yoga] root node set to ${VIEWPORT_WIDTH}x${VIEWPORT_HEIGHT}, building tree…`);
+
+  // Log raw CSS of first body child before building tree — tells us whether
+  // getComputedStyle is returning real values or empty strings in serverless.
+  const firstChild = Array.from(body.children)[0];
+  if (firstChild) {
+    const rawStyles = resolveStyles(firstChild, win);
+    console.log(
+      `[hollow/yoga] first child <${firstChild.tagName.toLowerCase()}> raw styles:` +
+      ` display=${rawStyles.display}` +
+      ` width=${rawStyles.width}` +
+      ` height=${rawStyles.height}` +
+      ` position=${rawStyles.position}` +
+      ` flexGrow=${rawStyles.flexGrow}` +
+      ` flexShrink=${rawStyles.flexShrink}` +
+      ` visibility=${rawStyles.visibility}`
+    );
+  }
 
   let childIndex = 0;
   for (const child of Array.from(body.children)) {
@@ -359,12 +377,21 @@ export async function calculateLayout(body: Element, win: Window): Promise<YogaR
 
   root.calculateLayout(VIEWPORT_WIDTH, VIEWPORT_HEIGHT, Yoga.DIRECTION_LTR);
 
-  const firstChild = Array.from(body.children)[0];
+  // Log root computed dimensions — if 0, setWidth/setHeight did not take effect.
+  const rootComputed = root.getComputedLayout();
+  console.log(
+    `[hollow/yoga] root computed: w=${rootComputed.width} h=${rootComputed.height}` +
+    ` (expected ${VIEWPORT_WIDTH}x${VIEWPORT_HEIGHT})`
+  );
+
   if (firstChild) {
     const firstEntry = nodeMap.get(firstChild);
     if (firstEntry) {
       const spot = firstEntry.yogaNode.getComputedLayout();
-      console.log(`[hollow/yoga] first child <${firstChild.tagName.toLowerCase()}> computed: w=${spot.width} h=${spot.height} x=${spot.left} y=${spot.top}`);
+      console.log(
+        `[hollow/yoga] first child <${firstChild.tagName.toLowerCase()}> computed:` +
+        ` w=${spot.width} h=${spot.height} x=${spot.left} y=${spot.top}`
+      );
     } else {
       console.log(`[hollow/yoga] first child <${firstChild.tagName.toLowerCase()}> not in nodeMap (invisible/skipped)`);
     }
