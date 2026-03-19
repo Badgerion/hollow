@@ -1,0 +1,7 @@
+{
+  "functions": {
+    "app/api/perceive/route.ts": { "maxDuration": 30 },
+    "app/api/act/route.ts":      { "maxDuration": 30 },
+    "app/api/stream/[sessionId]/route.ts": { "maxDuration": 60 }
+  }
+}

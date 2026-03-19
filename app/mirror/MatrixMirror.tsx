@@ -358,6 +358,13 @@ export function MatrixMirror({ sessionId }: { sessionId: string | null }) {
       }
     });
 
+    // Stream self-closes every 55 s in production (poll_timeout).
+    // EventSource will reconnect automatically — just log it.
+    sse.addEventListener('reconnect', () => {
+      setStatus('connecting');
+      addEntry({ tag: 'SYS', message: 'Stream cycling — reconnecting…', timestamp: new Date().toISOString() });
+    });
+
     sse.onerror = () => {
       setStatus('error');
       addEntry({ tag: 'ERR', message: 'SSE connection lost.', timestamp: new Date().toISOString() });
