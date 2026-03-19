@@ -8,8 +8,33 @@
  * Zero idle cost between steps.
  */
 
+import { promisify } from 'util';
+import { brotliCompress, brotliDecompress } from 'zlib';
 import type { SessionState } from './types';
 import { getRedis, hasRedis } from './redis';
+
+const brotliCompressAsync  = promisify(brotliCompress);
+const brotliDecompressAsync = promisify(brotliDecompress);
+
+const BROTLI_PREFIX = 'brotli:';
+
+async function compress(json: string): Promise<string> {
+  const input = Buffer.from(json, 'utf8');
+  const compressed = await brotliCompressAsync(input);
+  const encoded = BROTLI_PREFIX + compressed.toString('base64');
+  const pct = Math.round((1 - encoded.length / json.length) * 100);
+  console.log(
+    `[hollow/session] compressed ${(json.length / 1024).toFixed(1)}kb → ${(encoded.length / 1024).toFixed(1)}kb (${pct}%)`
+  );
+  return encoded;
+}
+
+async function decompress(stored: string): Promise<string> {
+  if (!stored.startsWith(BROTLI_PREFIX)) return stored; // uncompressed legacy value
+  const buf = Buffer.from(stored.slice(BROTLI_PREFIX.length), 'base64');
+  const decompressed = await brotliDecompressAsync(buf);
+  return decompressed.toString('utf8');
+}
 
 const SESSION_TTL = parseInt(process.env.SESSION_TTL_SECONDS ?? '3600', 10);
 
@@ -59,18 +84,20 @@ async function kvDelete(key: string): Promise<void> {
 // ─── Session CRUD ─────────────────────────────────────────────────────────────
 
 export async function loadSession(sessionId: string): Promise<SessionState | null> {
-  const raw = await kvGet(`hollow:session:${sessionId}`);
-  if (!raw) return null;
+  const stored = await kvGet(`hollow:session:${sessionId}`);
+  if (!stored) return null;
   try {
-    return JSON.parse(raw) as SessionState;
+    const json = await decompress(stored);
+    return JSON.parse(json) as SessionState;
   } catch {
     return null;
   }
 }
 
 export async function saveSession(state: SessionState): Promise<void> {
-  const raw = JSON.stringify(state);
-  await kvSet(`hollow:session:${state.sessionId}`, raw, SESSION_TTL);
+  const json = JSON.stringify(state);
+  const stored = await compress(json);
+  await kvSet(`hollow:session:${state.sessionId}`, stored, SESSION_TTL);
 }
 
 export async function deleteSession(sessionId: string): Promise<void> {

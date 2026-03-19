@@ -16,6 +16,8 @@ interface LogEntry {
   gdgMap?: string;
   confidence?: number;
   tier?: Tier;
+  /** Opaque key used to deduplicate events from SSE + polling firing simultaneously. */
+  dedupKey?: string;
 }
 
 // ─── Design tokens ────────────────────────────────────────────────────────────
@@ -464,7 +466,13 @@ export function MatrixMirror({ sessionId }: { sessionId: string | null }) {
 
   const addEntry = useCallback((entry: Omit<LogEntry, 'id'>) => {
     const id = uid();
-    setLog(prev => [...prev, { id, ...entry }]);
+    setLog(prev => {
+      // Deduplicate: if a dedupKey is present and we already have an entry with
+      // that key, drop the new one. Prevents SSE log_entry + gdg_map events, and
+      // SSE + polling, from both adding a GDG row for the same perception step.
+      if (entry.dedupKey && prev.some(e => e.dedupKey === entry.dedupKey)) return prev;
+      return [...prev, { id, ...entry }];
+    });
   }, []);
 
   // SSE connection + polling fallback
@@ -511,6 +519,7 @@ export function MatrixMirror({ sessionId }: { sessionId: string | null }) {
               gdgMap: d.gdgMap,
               confidence: d.confidence,
               tier: d.tier as Tier,
+              dedupKey: `gdg:${(d.gdgMap as string).slice(0, 64)}`,
             });
           }
         } catch { /* transient network error — retry next tick */ }
@@ -529,6 +538,9 @@ export function MatrixMirror({ sessionId }: { sessionId: string | null }) {
 
     sse.addEventListener('log_entry', (e: MessageEvent) => {
       const data = JSON.parse(e.data);
+      // Skip GDG log_entry events — the richer gdg_map event for the same
+      // perception step always follows and is the canonical GDG log row.
+      if (data.tag === 'GDG') return;
       addEntry({ tag: data.tag as LogTag, message: data.message, timestamp: data.timestamp ?? new Date().toISOString() });
       if (data.tag === 'ACT' && data.elementId !== undefined) {
         setActiveId(data.elementId as number);
@@ -549,6 +561,9 @@ export function MatrixMirror({ sessionId }: { sessionId: string | null }) {
         gdgMap: data.map,
         confidence: data.confidence,
         tier: data.tier as Tier,
+        // First 64 chars of map content uniquely identify this perception step.
+        // Polling may race with SSE — the dedupKey silently drops the duplicate.
+        dedupKey: `gdg:${(data.map ?? '').slice(0, 64)}`,
       });
     });
 
