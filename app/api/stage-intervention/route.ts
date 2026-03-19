@@ -18,7 +18,9 @@ async function storeIntervention(sessionId: string, text: string): Promise<void>
 
 export async function POST(req: NextRequest) {
   const body = await req.json();
-  const { sessionId, text } = body as { sessionId: string; text: string };
+  const { sessionId: rawId, text } = body as { sessionId: string; text: string };
+  // Strip sess: prefix — internal KV keys use bare UUIDs
+  const sessionId = rawId?.replace(/^sess:/, '');
 
   if (!sessionId || !text) {
     return NextResponse.json({ error: 'sessionId and text required' }, { status: 400 });

@@ -14,8 +14,12 @@ export async function GET(
   _req: NextRequest,
   { params }: { params: { sessionId: string } }
 ): Promise<NextResponse> {
-  const { sessionId } = params;
+  const { sessionId: rawId } = params;
+  // Strip sess: prefix — internal KV keys use bare UUIDs; accept both formats
+  const sessionId = rawId.replace(/^sess:/, '');
   const session = await loadSession(sessionId);
+
+  console.log(`[hollow/session] GET rawId=${rawId} bareId=${sessionId} found=${!!session}`);
 
   if (!session) {
     return NextResponse.json({ error: 'Session not found' }, { status: 404 });

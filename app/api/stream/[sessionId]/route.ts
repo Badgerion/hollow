@@ -39,7 +39,8 @@ export async function GET(
   _req: NextRequest,
   { params }: { params: { sessionId: string } }
 ): Promise<Response> {
-  const { sessionId } = params;
+  // Strip sess: prefix — internal KV keys use bare UUIDs
+  const sessionId = params.sessionId.replace(/^sess:/, '');
   const session = await loadSession(sessionId);
   const encoder = new TextEncoder();
 

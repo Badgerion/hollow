@@ -28,7 +28,8 @@ import type { HollowPerceiveResult, PerceiveRequest, SessionState } from './type
 import type { LayoutBox } from './yoga-layout';
 
 export async function perceive(req: PerceiveRequest): Promise<HollowPerceiveResult> {
-  const sessionId = req.sessionId ?? uuidv4();
+  // Strip optional sess: prefix — internal IDs are bare UUIDs; prefix is external-only
+  const sessionId = req.sessionId ? req.sessionId.replace(/^sess:/, '') : uuidv4();
   const emit = getEmitter();
   const now = () => new Date().toISOString();
 
@@ -208,7 +209,7 @@ export async function perceive(req: PerceiveRequest): Promise<HollowPerceiveResu
 
   // ── Step 10: Response ─────────────────────────────────────────────────────────
   return {
-    sessionId,
+    sessionId: `sess:${sessionId}`,  // external callers get the prefixed form
     gdgMap: gdg.map,
     domDelta: liveHtml,
     confidence,

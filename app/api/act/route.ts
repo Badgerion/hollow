@@ -32,7 +32,10 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ error: '`action.type` is required' }, { status: 400 });
   }
 
-  const session = await loadSession(body.sessionId);
+  // Strip sess: prefix — internal KV keys use bare UUIDs
+  const sessionId = body.sessionId.replace(/^sess:/, '');
+
+  const session = await loadSession(sessionId);
   if (!session) {
     return NextResponse.json(
       { error: `Session ${body.sessionId} not found or expired` },
@@ -100,7 +103,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
     // Emit ACT event for Matrix Mirror highlight before re-perception
     if (action.elementId !== undefined) {
-      getEmitter().emit(body.sessionId, 'log_entry', {
+      getEmitter().emit(sessionId, 'log_entry', {
         tag: 'ACT',
         message: `${action.type} element #${action.elementId}${action.value !== undefined ? ` → "${action.value}"` : ''}`,
         timestamp: new Date().toISOString(),
@@ -114,7 +117,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     const intervention = body.intervention;
     const result = await perceive({
       url: session.url,
-      sessionId: body.sessionId,
+      sessionId,
     });
 
     // Surface any intervention in the response for Matrix Mirror
