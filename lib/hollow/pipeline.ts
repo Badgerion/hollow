@@ -18,7 +18,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { fetchUrl } from './network';
 import { buildDOM } from './dom';
 import { resolveStyles } from './css-resolver';
-import { initYoga, calculateLayout, calculateSubtreeLayout } from './yoga-layout';
+import { calculateLayout, calculateSubtreeLayout } from './yoga-layout';
 import { resolveGridLayout } from './grid-resolver';
 import { generateGDGSpatial } from './gdg-spatial';
 import { scoreConfidence } from './confidence';
@@ -80,19 +80,6 @@ export async function perceive(req: PerceiveRequest): Promise<HollowPerceiveResu
   }
 
   // ── Steps 3–4: CSS + Yoga Flexbox layout ────────────────────────────────────
-  // Explicitly await WASM init before layout work begins.
-  // This surfaces init failures as clear errors in Vercel logs rather than
-  // silent downstream misbehaviour, and ensures the cold-start import()
-  // resolves fully before calculateLayout() is entered.
-  console.log(`[hollow/pipeline] awaiting Yoga WASM init — sessionId=${sessionId}`);
-  try {
-    await initYoga();
-  } catch (err) {
-    console.error(`[hollow/pipeline] Yoga WASM init FAILED — sessionId=${sessionId}`, err);
-    throw err;
-  }
-  console.log(`[hollow/pipeline] Yoga WASM ready — sessionId=${sessionId}`);
-
   const { layoutMap, deductions: layoutDeductions } = await calculateLayout(
     body as unknown as Element,
     window

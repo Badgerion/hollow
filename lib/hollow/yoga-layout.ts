@@ -1,14 +1,27 @@
 /**
  * Yoga layout engine — computes Flexbox X/Y/W/H for every DOM element.
  *
- * Uses yoga-layout (pure ESM, WASM-backed). The module uses top-level await
- * internally and cannot be require()'d — we load it once via dynamic import()
- * and cache the ready instance on globalThis so all serverless invocations
- * within the same warm container share one initialised copy.
+ * Uses yoga-layout-prebuilt: a pre-compiled pure-JS build of Yoga with no
+ * WASM binary and no async initialisation. Loads synchronously at module
+ * level — safe on all Node.js runtimes including Vercel serverless where
+ * dynamic WASM loading hangs indefinitely.
  *
  * Maps computed CSS styles → Yoga node properties, builds the parent-child
  * tree, calls calculateLayout(), extracts the coordinate map.
  */
+
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const Yoga = require('yoga-layout-prebuilt');
+
+// Immediate health check — fails fast on cold start if the package is broken.
+try {
+  const _probe = Yoga.Node.create();
+  _probe.free();
+  console.log('[hollow/yoga] loaded synchronously — Node.create functional');
+} catch (err) {
+  console.error('[hollow/yoga] yoga-layout-prebuilt failed to initialise:', err);
+  throw err; // surface immediately rather than failing silently later
+}
 
 import type { Window } from 'happy-dom';
 import { isLayoutElement } from './dom';
@@ -30,46 +43,9 @@ export interface YogaResult {
 const VIEWPORT_WIDTH = parseInt(process.env.HOLLOW_VIEWPORT_WIDTH ?? '1280', 10);
 const VIEWPORT_HEIGHT = parseInt(process.env.HOLLOW_VIEWPORT_HEIGHT ?? '800', 10);
 
-// ─── Yoga async init ──────────────────────────────────────────────────────────
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-type YogaModule = any;
-
-const g = global as typeof globalThis & { __hollowYoga?: YogaModule };
-
-async function getYoga(): Promise<YogaModule> {
-  if (g.__hollowYoga) return g.__hollowYoga;
-  console.log('[hollow/yoga] init start — loading yoga-layout WASM');
-  let mod: { default: YogaModule };
-  try {
-    mod = await import('yoga-layout');
-  } catch (err) {
-    console.error('[hollow/yoga] import("yoga-layout") threw:', err);
-    throw err;
-  }
-  const Yoga = mod.default;
-  if (!Yoga || typeof Yoga.Node?.create !== 'function') {
-    const msg = `[hollow/yoga] unexpected module shape — default=${typeof Yoga}`;
-    console.error(msg);
-    throw new Error(msg);
-  }
-  g.__hollowYoga = Yoga;
-  console.log('[hollow/yoga] init complete — Node.create functional');
-  return Yoga;
-}
-
-/**
- * Exported warm-up helper.
- * Call `await initYoga()` before entering the layout pipeline so that
- * the WASM init is explicit, logged, and clearly separated from layout work.
- */
-export async function initYoga(): Promise<void> {
-  await getYoga();
-}
-
 // ─── Yoga constant helpers ────────────────────────────────────────────────────
 
-function flexDirection(Yoga: YogaModule, val: string): number {
+function flexDirection(val: string): number {
   switch (val) {
     case 'row': return Yoga.FLEX_DIRECTION_ROW;
     case 'row-reverse': return Yoga.FLEX_DIRECTION_ROW_REVERSE;
@@ -79,7 +55,7 @@ function flexDirection(Yoga: YogaModule, val: string): number {
   }
 }
 
-function justifyContent(Yoga: YogaModule, val: string): number {
+function justifyContent(val: string): number {
   switch (val) {
     case 'flex-start': case 'start': return Yoga.JUSTIFY_FLEX_START;
     case 'center': return Yoga.JUSTIFY_CENTER;
@@ -91,7 +67,7 @@ function justifyContent(Yoga: YogaModule, val: string): number {
   }
 }
 
-function alignItems(Yoga: YogaModule, val: string): number {
+function alignItems(val: string): number {
   switch (val) {
     case 'flex-start': case 'start': return Yoga.ALIGN_FLEX_START;
     case 'center': return Yoga.ALIGN_CENTER;
@@ -102,7 +78,7 @@ function alignItems(Yoga: YogaModule, val: string): number {
   }
 }
 
-function alignContent(Yoga: YogaModule, val: string): number {
+function alignContent(val: string): number {
   switch (val) {
     case 'flex-start': case 'start': return Yoga.ALIGN_FLEX_START;
     case 'center': return Yoga.ALIGN_CENTER;
@@ -114,7 +90,7 @@ function alignContent(Yoga: YogaModule, val: string): number {
   }
 }
 
-function flexWrap(Yoga: YogaModule, val: string): number {
+function flexWrap(val: string): number {
   switch (val) {
     case 'wrap': return Yoga.WRAP_WRAP;
     case 'wrap-reverse': return Yoga.WRAP_WRAP_REVERSE;
@@ -122,12 +98,12 @@ function flexWrap(Yoga: YogaModule, val: string): number {
   }
 }
 
-function positionType(Yoga: YogaModule, val: string): number {
+function positionType(val: string): number {
   if (val === 'absolute' || val === 'fixed') return Yoga.POSITION_TYPE_ABSOLUTE;
   return Yoga.POSITION_TYPE_RELATIVE;
 }
 
-function overflow(Yoga: YogaModule, val: string): number {
+function overflow(val: string): number {
   switch (val) {
     case 'hidden': return Yoga.OVERFLOW_HIDDEN;
     case 'scroll': return Yoga.OVERFLOW_SCROLL;
@@ -138,34 +114,27 @@ function overflow(Yoga: YogaModule, val: string): number {
 // ─── Apply styles to a Yoga node ─────────────────────────────────────────────
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-function applyStyles(Yoga: YogaModule, node: any, styles: ComputedStyles): void {
-  // Display / position
-  node.setPositionType(positionType(Yoga, styles.position));
-  node.setOverflow(overflow(Yoga, styles.overflow));
+function applyStyles(node: any, styles: ComputedStyles): void {
+  node.setPositionType(positionType(styles.position));
+  node.setOverflow(overflow(styles.overflow));
 
-  // Flexbox container properties
   const isFlexContainer = styles.display === 'flex' || styles.display === 'inline-flex';
   if (isFlexContainer) {
-    node.setFlexDirection(flexDirection(Yoga, styles.flexDirection));
-    node.setJustifyContent(justifyContent(Yoga, styles.justifyContent));
-    node.setAlignItems(alignItems(Yoga, styles.alignItems));
-    node.setAlignContent(alignContent(Yoga, styles.alignContent));
-    node.setFlexWrap(flexWrap(Yoga, styles.flexWrap));
+    node.setFlexDirection(flexDirection(styles.flexDirection));
+    node.setJustifyContent(justifyContent(styles.justifyContent));
+    node.setAlignItems(alignItems(styles.alignItems));
+    node.setAlignContent(alignContent(styles.alignContent));
+    node.setFlexWrap(flexWrap(styles.flexWrap));
   }
 
-  // Flex item properties
   node.setFlexGrow(styles.flexGrow);
   node.setFlexShrink(styles.flexShrink);
 
-  // Flex basis
-  if (styles.flexBasis === 'auto' || !styles.flexBasis) {
-    // leave unset — Yoga defaults
-  } else {
+  if (styles.flexBasis && styles.flexBasis !== 'auto') {
     const fb = parsePx(styles.flexBasis);
     if (!isNaN(fb) && fb > 0) node.setFlexBasis(fb);
   }
 
-  // Width / Height
   applyDimension(node, 'width', styles.width);
   applyDimension(node, 'height', styles.height);
   applyDimension(node, 'minWidth', styles.minWidth);
@@ -173,25 +142,21 @@ function applyStyles(Yoga: YogaModule, node: any, styles: ComputedStyles): void 
   applyDimension(node, 'minHeight', styles.minHeight);
   applyDimension(node, 'maxHeight', styles.maxHeight);
 
-  // Margins
   node.setMargin(Yoga.EDGE_TOP, styles.marginTop);
   node.setMargin(Yoga.EDGE_RIGHT, styles.marginRight);
   node.setMargin(Yoga.EDGE_BOTTOM, styles.marginBottom);
   node.setMargin(Yoga.EDGE_LEFT, styles.marginLeft);
 
-  // Padding
   node.setPadding(Yoga.EDGE_TOP, styles.paddingTop);
   node.setPadding(Yoga.EDGE_RIGHT, styles.paddingRight);
   node.setPadding(Yoga.EDGE_BOTTOM, styles.paddingBottom);
   node.setPadding(Yoga.EDGE_LEFT, styles.paddingLeft);
 
-  // Borders
   node.setBorder(Yoga.EDGE_TOP, styles.borderTopWidth);
   node.setBorder(Yoga.EDGE_RIGHT, styles.borderRightWidth);
   node.setBorder(Yoga.EDGE_BOTTOM, styles.borderBottomWidth);
   node.setBorder(Yoga.EDGE_LEFT, styles.borderLeftWidth);
 
-  // Absolute/fixed positioning offsets
   if (styles.position === 'absolute' || styles.position === 'fixed') {
     const top = parsePx(styles.top);
     const left = parsePx(styles.left);
@@ -245,7 +210,6 @@ interface NodeEntry {
 }
 
 function buildYogaTree(
-  Yoga: YogaModule,
   el: Element,
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   parentNode: any,
@@ -258,18 +222,16 @@ function buildYogaTree(
 
   const styles = resolveStyles(el, win);
 
-  // Skip invisible elements
   if (styles.visibility === 'hidden' || styles.display === 'none') return;
 
   const node = Yoga.Node.create();
 
   try {
-    applyStyles(Yoga, node, styles);
+    applyStyles(node, styles);
   } catch {
     // If Yoga rejects a value, continue with defaults
   }
 
-  // Collect confidence signals
   if (styles.position === 'absolute' || styles.position === 'fixed') {
     deductions.push({
       reason: `${styles.position === 'fixed' ? 'fixed' : 'absolute'} element <${el.tagName.toLowerCase()}>`,
@@ -284,7 +246,6 @@ function buildYogaTree(
     });
   }
 
-  // Check for unresolved CSS variables in layout-relevant properties
   const layoutProps = [styles.width, styles.height, styles.flexBasis, styles.gridTemplateColumns];
   for (const prop of layoutProps) {
     if (hasCSSVariable(prop)) {
@@ -296,13 +257,12 @@ function buildYogaTree(
   nodeMap.set(el, { el, yogaNode: node, styles });
   parentNode.insertChild(node, parentIndex);
 
-  // Grid containers are handled by the Grid resolver, not Yoga
   const isGridContainer = styles.display === 'grid' || styles.display === 'inline-grid';
 
   if (!isGridContainer) {
     let childIndex = 0;
     for (const child of Array.from(el.children)) {
-      buildYogaTree(Yoga, child, node, childIndex, win, nodeMap, deductions);
+      buildYogaTree(child, node, childIndex, win, nodeMap, deductions);
       childIndex++;
     }
   }
@@ -324,12 +284,7 @@ function extractLayouts(
   const x = parentX + computed.left;
   const y = parentY + computed.top;
 
-  layoutMap.set(el, {
-    x,
-    y,
-    width: computed.width,
-    height: computed.height,
-  });
+  layoutMap.set(el, { x, y, width: computed.width, height: computed.height });
 
   const isGridContainer =
     entry.styles.display === 'grid' || entry.styles.display === 'inline-grid';
@@ -345,19 +300,11 @@ function extractLayouts(
 
 function freeAll(nodeMap: Map<Element, NodeEntry>): void {
   for (const { yogaNode } of nodeMap.values()) {
-    try {
-      yogaNode.free();
-    } catch {
-      // ignore
-    }
+    try { yogaNode.free(); } catch { /* ignore */ }
   }
 }
 
 // ─── Sub-tree layout (for grid cell descendants) ─────────────────────────────
-//
-// After the Grid resolver places direct grid children, this runs a fresh Yoga
-// pass on each grid cell's contents using the cell's bounding box as the origin.
-// This surfaces layout, absolute elements, and transforms inside grid cells.
 
 export async function calculateSubtreeLayout(
   el: Element,
@@ -366,10 +313,8 @@ export async function calculateSubtreeLayout(
   layoutMap: Map<Element, LayoutBox>,
   deductions: ConfidenceDeduction[]
 ): Promise<void> {
-  const Yoga = await getYoga();
   const nodeMap = new Map<Element, NodeEntry>();
 
-  // Root sized to the grid cell's box
   const root = Yoga.Node.create();
   root.setWidth(parentBox.width);
   root.setHeight(parentBox.height);
@@ -377,7 +322,7 @@ export async function calculateSubtreeLayout(
 
   let childIndex = 0;
   for (const child of Array.from(el.children)) {
-    buildYogaTree(Yoga, child, root, childIndex, win, nodeMap, deductions);
+    buildYogaTree(child, root, childIndex, win, nodeMap, deductions);
     childIndex++;
   }
 
@@ -394,11 +339,9 @@ export async function calculateSubtreeLayout(
 // ─── Main entry point ─────────────────────────────────────────────────────────
 
 export async function calculateLayout(body: Element, win: Window): Promise<YogaResult> {
-  const Yoga = await getYoga();
   const nodeMap = new Map<Element, NodeEntry>();
   const deductions: ConfidenceDeduction[] = [];
 
-  // Root node = viewport
   const root = Yoga.Node.create();
   root.setWidth(VIEWPORT_WIDTH);
   root.setHeight(VIEWPORT_HEIGHT);
@@ -408,16 +351,14 @@ export async function calculateLayout(body: Element, win: Window): Promise<YogaR
 
   let childIndex = 0;
   for (const child of Array.from(body.children)) {
-    buildYogaTree(Yoga, child, root, childIndex, win, nodeMap, deductions);
+    buildYogaTree(child, root, childIndex, win, nodeMap, deductions);
     childIndex++;
   }
 
   console.log(`[hollow/yoga] tree built — ${nodeMap.size} nodes, ${root.getChildCount()} direct body children`);
 
-  // Run the layout pass
   root.calculateLayout(VIEWPORT_WIDTH, VIEWPORT_HEIGHT, Yoga.DIRECTION_LTR);
 
-  // Spot-check: log the first direct child's computed layout to detect zero-dimension issues
   const firstChild = Array.from(body.children)[0];
   if (firstChild) {
     const firstEntry = nodeMap.get(firstChild);
@@ -429,7 +370,6 @@ export async function calculateLayout(body: Element, win: Window): Promise<YogaR
     }
   }
 
-  // Extract coordinates
   const layoutMap = new Map<Element, LayoutBox>();
   for (const child of Array.from(body.children)) {
     extractLayouts(child, 0, 0, nodeMap, layoutMap);
@@ -437,7 +377,6 @@ export async function calculateLayout(body: Element, win: Window): Promise<YogaR
 
   console.log(`[hollow/yoga] layout complete — ${layoutMap.size} elements mapped`);
 
-  // Cleanup WASM memory
   freeAll(nodeMap);
   root.free();
 
