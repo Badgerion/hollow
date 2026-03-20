@@ -57,6 +57,18 @@ export async function buildDOM(html: string, url: string): Promise<DOMResult> {
     vitality.capture(message);
   });
 
+  // ── Polyfills ──────────────────────────────────────────────────────────────
+  // Happy DOM does not expose these globals. Injecting them before document.write
+  // means any inline <script> that runs during parsing sees them immediately.
+
+  // TextEncoder / TextDecoder — missing in Happy DOM, needed by most modern
+  // bundles (webpack runtime, React 18+, fetch polyfills, etc.)
+  // Node's built-in TextEncoder is fully spec-compliant; expose it directly.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const win = window as any;
+  if (!win.TextEncoder) win.TextEncoder = TextEncoder;   // Node global
+  if (!win.TextDecoder) win.TextDecoder = TextDecoder;   // Node global
+
   // Write the HTML into the document
   window.document.write(html);
   window.document.close();
