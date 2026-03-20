@@ -79,12 +79,20 @@ export async function perceive(req: PerceiveRequest): Promise<HollowPerceiveResu
   });
 
   // ── Step 2: Happy DOM — parse HTML, execute JS ───────────────────────────────
-  const { window, document, vitality } = await step('2-happy-dom', () =>
+  const { window, document, vitality, jsExecutionTimedOut } = await step('2-happy-dom', () =>
     buildDOM(html, finalUrl)
   );
 
   const jsErrors = vitality.getErrors();
-  console.log(`[hollow/pipeline] 2-happy-dom: jsErrors=${jsErrors.length}`);
+  console.log(`[hollow/pipeline] 2-happy-dom: jsErrors=${jsErrors.length} timedOut=${jsExecutionTimedOut}`);
+
+  if (jsExecutionTimedOut) {
+    emit.emit(sessionId, 'log_entry', {
+      tag: 'WARN',
+      message: 'JS execution timeout (10s) — proceeding with partial DOM.',
+      timestamp: now(),
+    });
+  }
 
   if (jsErrors.length > 0) {
     for (const err of jsErrors) {
@@ -167,6 +175,10 @@ export async function perceive(req: PerceiveRequest): Promise<HollowPerceiveResu
   console.log(`[hollow/pipeline] 6-gdg-spatial: tokens=${gdg.tokenEstimate} actionable=${gdg.actionableCount}`);
 
   // ── Step 7: Confidence scoring ────────────────────────────────────────────────
+  if (jsExecutionTimedOut) {
+    layoutDeductions.push({ reason: 'JS execution timeout — partial DOM', amount: 0.15 });
+  }
+
   const { score, deductions, tier } = await step('7-confidence', () =>
     Promise.resolve(scoreConfidence(layoutDeductions, jsErrors))
   );

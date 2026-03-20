@@ -13,6 +13,7 @@ export interface DOMResult {
   document: Window['document'];
   vitality: VitalityMonitor;
   html: string;
+  jsExecutionTimedOut: boolean;
 }
 
 const VIEWPORT_WIDTH = parseInt(process.env.HOLLOW_VIEWPORT_WIDTH ?? '1280', 10);
@@ -89,9 +90,22 @@ export async function buildDOM(html: string, url: string): Promise<DOMResult> {
   window.document.write(html);
   window.document.close();
 
-  // Wait for microtasks, timers, and pending scripts to settle
+  // Wait for microtasks, timers, and pending scripts to settle.
+  // Cap at JS_EXECUTION_TIMEOUT ms so complex bundles don't exhaust Vercel's
+  // 60s function limit. On timeout we proceed with the partial DOM.
+  const JS_EXECUTION_TIMEOUT = 10_000;
+  let jsExecutionTimedOut = false;
+
+  const timeoutPromise = new Promise<void>((resolve) => {
+    setTimeout(() => {
+      jsExecutionTimedOut = true;
+      console.log('[hollow/dom] JS execution timeout after 10s — proceeding with partial DOM');
+      resolve();
+    }, JS_EXECUTION_TIMEOUT);
+  });
+
   try {
-    await window.happyDOM.waitUntilComplete();
+    await Promise.race([window.happyDOM.waitUntilComplete(), timeoutPromise]);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     vitality.capture(message);
@@ -104,6 +118,7 @@ export async function buildDOM(html: string, url: string): Promise<DOMResult> {
     document: window.document,
     vitality,
     html: finalHtml,
+    jsExecutionTimedOut,
   };
 }
 
