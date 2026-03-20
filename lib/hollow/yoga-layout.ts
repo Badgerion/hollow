@@ -209,6 +209,11 @@ interface NodeEntry {
   styles: ComputedStyles;
 }
 
+// Returns true if the node was inserted into the parent, false if skipped.
+// IMPORTANT: callers must only increment their childIndex when this returns
+// true — if a skipped child still advances the index, the next sibling's
+// insertChild call gets index > parent.getChildCount() and throws, silently
+// dropping every sibling that follows.
 function buildYogaTree(
   el: Element,
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -217,21 +222,21 @@ function buildYogaTree(
   win: Window,
   nodeMap: Map<Element, NodeEntry>,
   deductions: ConfidenceDeduction[]
-): void {
-  if (!isLayoutElement(el)) return;
+): boolean {
+  if (!isLayoutElement(el)) return false;
 
   const styles = resolveStyles(el, win);
 
-  if (styles.visibility === 'hidden' || styles.display === 'none') return;
+  if (styles.visibility === 'hidden' || styles.display === 'none') return false;
 
   // Guard: Node.create() can throw on malformed page content.
-  // Skip the node entirely rather than crashing the whole pipeline.
-  let node: unknown;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let node: any;
   try {
     node = Yoga.Node.create();
   } catch (err) {
     console.warn(`[hollow/yoga] Node.create() failed for <${el.tagName.toLowerCase()}>:`, err);
-    return;
+    return false;
   }
 
   try {
@@ -265,9 +270,9 @@ function buildYogaTree(
   try {
     parentNode.insertChild(node, parentIndex);
   } catch (err) {
-    console.warn(`[hollow/yoga] insertChild failed for <${el.tagName.toLowerCase()}>:`, err);
-    try { (node as { free(): void }).free(); } catch { /* ignore */ }
-    return;
+    console.warn(`[hollow/yoga] insertChild failed for <${el.tagName.toLowerCase()}> at index ${parentIndex}:`, err);
+    try { node.free(); } catch { /* ignore */ }
+    return false;
   }
 
   nodeMap.set(el, { el, yogaNode: node, styles });
@@ -278,14 +283,18 @@ function buildYogaTree(
     let childIndex = 0;
     for (const child of Array.from(el.children)) {
       try {
-        buildYogaTree(child, node, childIndex, win, nodeMap, deductions);
-        childIndex++;
+        // Only advance the index when the child was actually inserted.
+        if (buildYogaTree(child, node, childIndex, win, nodeMap, deductions)) {
+          childIndex++;
+        }
       } catch (err) {
         console.warn(`[hollow/yoga] child tree failed for <${child.tagName?.toLowerCase()}>:`, err);
-        // continue with remaining siblings
+        // continue with remaining siblings; do NOT increment childIndex
       }
     }
   }
+
+  return true;
 }
 
 // ─── Extract layout from calculated tree ─────────────────────────────────────
@@ -342,8 +351,9 @@ export async function calculateSubtreeLayout(
 
   let childIndex = 0;
   for (const child of Array.from(el.children)) {
-    buildYogaTree(child, root, childIndex, win, nodeMap, deductions);
-    childIndex++;
+    if (buildYogaTree(child, root, childIndex, win, nodeMap, deductions)) {
+      childIndex++;
+    }
   }
 
   root.calculateLayout(parentBox.width, parentBox.height, Yoga.DIRECTION_LTR);
@@ -389,18 +399,24 @@ export async function calculateLayout(body: Element, win: Window): Promise<YogaR
 
   let childIndex = 0;
   for (const child of Array.from(body.children)) {
-    buildYogaTree(child, root, childIndex, win, nodeMap, deductions);
-    childIndex++;
+    // Only advance childIndex when the node was actually inserted.
+    // Skipped nodes (script/style/invisible) must NOT consume an index slot —
+    // insertChild(node, index) throws when index > current child count.
+    if (buildYogaTree(child, root, childIndex, win, nodeMap, deductions)) {
+      childIndex++;
+    }
   }
 
-  console.log(`[hollow/yoga] tree built — ${nodeMap.size} nodes, ${root.getChildCount()} direct body children`);
+  console.log(`[hollow/yoga] tree built — ${nodeMap.size} nodes, ${root.getChildCount()} direct body children inserted`);
+
+  // Confirm root is sized before we ask Yoga to compute layout.
+  console.log(`[hollow/yoga] root before calculateLayout: setWidth=${VIEWPORT_WIDTH} setHeight=${VIEWPORT_HEIGHT} childCount=${root.getChildCount()}`);
 
   root.calculateLayout(VIEWPORT_WIDTH, VIEWPORT_HEIGHT, Yoga.DIRECTION_LTR);
 
-  // Log root computed dimensions — if 0, setWidth/setHeight did not take effect.
   const rootComputed = root.getComputedLayout();
   console.log(
-    `[hollow/yoga] root computed: w=${rootComputed.width} h=${rootComputed.height}` +
+    `[hollow/yoga] root after calculateLayout: w=${rootComputed.width} h=${rootComputed.height}` +
     ` (expected ${VIEWPORT_WIDTH}x${VIEWPORT_HEIGHT})`
   );
 
