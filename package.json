@@ -2,6 +2,9 @@
   "name": "hollow",
   "version": "0.1.0",
   "private": true,
+  "license": "Apache-2.0",
+  "homepage": "https://hollow-tan-omega.vercel.app",
+  "repository": "https://github.com/Badgerion/hollow",
   "scripts": {
     "dev": "next dev",
     "build": "next build",
