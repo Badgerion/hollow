@@ -16,7 +16,7 @@ const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY ?? '';
 const MAX_STEPS = 10;
 const MODEL = 'claude-sonnet-4-20250514';
 
-const SYSTEM_PROMPT = `You are an AI agent operating a browser through Hollow, a serverless DOM interpreter.
+const SYSTEM_PROMPT_BASE = `You are an AI agent operating a browser through Hollow, a serverless DOM interpreter.
 You receive a GDG Spatial map showing the current page layout. Actionable elements have IDs like [12], [13] etc.
 
 To take an action, respond with a JSON object on its own line:
@@ -31,9 +31,15 @@ Rules:
 - If the page does not have what you need, navigate or click to find it.
 - Do not explain — just output the JSON action.`;
 
+const SYSTEM_PROMPT_NO_URL = `${SYSTEM_PROMPT_BASE}
+
+You have access to Hollow, a serverless browser. To start browsing, navigate to a URL using:
+  { "action": "navigate", "url": "https://..." }
+You decide where to go based on the task. Your first action must always be a navigate.`;
+
 // ─── CLI args ────────────────────────────────────────────────────────────────
 
-function parseArgs(): { url: string; task: string } {
+function parseArgs(): { url: string | null; task: string } {
   const args = process.argv.slice(2);
   const get = (flag: string) => {
     const i = args.indexOf(flag);
@@ -41,8 +47,8 @@ function parseArgs(): { url: string; task: string } {
   };
   const url  = get('--url');
   const task = get('--task');
-  if (!url || !task) {
-    console.error('Usage: npx tsx scripts/agent.ts --url "<url>" --task "<task>"');
+  if (!task) {
+    console.error('Usage: npx tsx scripts/agent.ts --task "<task>" [--url "<url>"]');
     process.exit(1);
   }
   return { url, task };
@@ -95,10 +101,12 @@ async function act(sessionId: string, action: AgentAction): Promise<ActResult> {
 
 // ─── Claude API helper ────────────────────────────────────────────────────────
 
-async function askClaude(task: string, gdgMap: string): Promise<AgentAction> {
+async function askClaude(task: string, gdgMap: string, systemPrompt: string): Promise<AgentAction> {
   if (!ANTHROPIC_API_KEY) throw new Error('ANTHROPIC_API_KEY is not set');
 
-  const userMessage = `Task: ${task}\n\nCurrent page:\n${gdgMap}`;
+  const userMessage = gdgMap
+    ? `Task: ${task}\n\nCurrent page:\n${gdgMap}`
+    : `Task: ${task}`;
 
   const res = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
@@ -110,7 +118,7 @@ async function askClaude(task: string, gdgMap: string): Promise<AgentAction> {
     body: JSON.stringify({
       model: MODEL,
       max_tokens: 256,
-      system: SYSTEM_PROMPT,
+      system: systemPrompt,
       messages: [{ role: 'user', content: userMessage }],
     }),
   });
@@ -171,24 +179,34 @@ function printStep(step: number, gdgMap: string, action: AgentAction) {
 async function main() {
   const { url, task } = parseArgs();
 
+  const systemPrompt = url ? SYSTEM_PROMPT_BASE : SYSTEM_PROMPT_NO_URL;
+
   console.log(`\n${HR}`);
   console.log('  Hollow Agent Loop');
   console.log(HR);
-  console.log(`  URL  : ${url}`);
+  if (url) console.log(`  URL  : ${url}`);
   console.log(`  Task : ${task}`);
   console.log(`  Host : ${HOLLOW_URL}`);
   console.log('');
 
-  // Step 1: perceive the initial URL
-  process.stdout.write('  Perceiving initial URL… ');
-  let result = await perceive(url);
-  let { sessionId, gdgMap } = result;
-  console.log(`done  (session ${sessionId})`);
+  let sessionId: string | undefined;
+  let gdgMap = '';
+
+  if (url) {
+    // Perceive the starting URL immediately
+    process.stdout.write('  Perceiving initial URL… ');
+    const result = await perceive(url);
+    sessionId = result.sessionId;
+    gdgMap    = result.gdgMap;
+    console.log(`done  (session ${sessionId})`);
+  } else {
+    console.log('  No URL provided — Claude will decide where to navigate.\n');
+  }
 
   // Main agent loop
   for (let step = 1; step <= MAX_STEPS; step++) {
     // Ask Claude what to do next
-    const action = await askClaude(task, gdgMap);
+    const action = await askClaude(task, gdgMap, systemPrompt);
     printStep(step, gdgMap, action);
 
     if (action.action === 'done') {
@@ -204,11 +222,12 @@ async function main() {
       const nav = await perceive(action.url, sessionId);
       sessionId = nav.sessionId;
       gdgMap    = nav.gdgMap;
-      console.log('done');
+      console.log(`done  (session ${sessionId})`);
       continue;
     }
 
     // click or fill — send to /api/act
+    if (!sessionId) throw new Error('No session — a navigate action must come first');
     process.stdout.write(`  Acting (${action.action})… `);
     const actResult = await act(sessionId, action);
     if (actResult.gdgMap) gdgMap = actResult.gdgMap;
