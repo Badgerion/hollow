@@ -485,6 +485,8 @@ export function MatrixMirror({ sessionId }: { sessionId: string | null }) {
     let hasData = false;
     let pollInterval: ReturnType<typeof setInterval> | null = null;
     let lastUpdatedAt = 0;
+    let sseDropLogged = false;       // only log the first SSE drop after data arrives
+    let pollingFoundLogged = false;  // only log "session found" once
 
     function stopPolling() {
       if (pollInterval) { clearInterval(pollInterval); pollInterval = null; }
@@ -502,9 +504,16 @@ export function MatrixMirror({ sessionId }: { sessionId: string | null }) {
       pollInterval = setInterval(async () => {
         try {
           const res = await fetch(`/api/session/${sessionId}`);
-          if (!res.ok) return;
+          if (!res.ok) return; // session not yet in Redis — wait silently
           const d = await res.json();
           if (d.updatedAt === lastUpdatedAt) return;
+
+          // First time polling finds the session: log once
+          if (!pollingFoundLogged) {
+            pollingFoundLogged = true;
+            addEntry({ tag: 'SYS', message: 'Session found. Polling active.', timestamp: new Date().toISOString() });
+          }
+
           lastUpdatedAt = d.updatedAt;
 
           if (d.html) setDomHtml(d.html);
@@ -541,6 +550,10 @@ export function MatrixMirror({ sessionId }: { sessionId: string | null }) {
       // Skip GDG log_entry events — the richer gdg_map event for the same
       // perception step always follows and is the canonical GDG log row.
       if (data.tag === 'GDG') return;
+      // Suppress repeated server-side "session not found" messages that fire
+      // on every SSE reconnect cycle before the first perceive completes.
+      // The client already handles this state silently via polling.
+      if (typeof data.message === 'string' && /session not found/i.test(data.message)) return;
       addEntry({ tag: data.tag as LogTag, message: data.message, timestamp: data.timestamp ?? new Date().toISOString() });
       if (data.tag === 'ACT' && data.elementId !== undefined) {
         setActiveId(data.elementId as number);
@@ -604,11 +617,17 @@ export function MatrixMirror({ sessionId }: { sessionId: string | null }) {
 
     sse.onerror = () => {
       if (!hasData) {
+        // SSE never delivered data — fall back to polling immediately
         clearTimeout(watchdog);
         startPolling();
       } else {
+        // SSE dropped after data arrived (normal on Hobby tier — 60s function timeout).
+        // Log only the first occurrence; subsequent auto-reconnect cycles are silent.
         setStatus('error');
-        addEntry({ tag: 'ERR', message: 'SSE connection lost.', timestamp: new Date().toISOString() });
+        if (!sseDropLogged) {
+          sseDropLogged = true;
+          addEntry({ tag: 'SYS', message: 'SSE stream ended (Hobby tier limit). Polling remains active.', timestamp: new Date().toISOString() });
+        }
       }
     };
 
