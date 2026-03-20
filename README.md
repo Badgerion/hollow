@@ -12,118 +12,9 @@ Hollow is a serverless DOM interpreter. It has the functional output of a browse
 
 It runs on Vercel. It is accessible via a URL. An AI agent can operate it with the laptop closed.
 
-```
-POST /api/perceive { url: "https://news.ycombinator.com" }
+![Matrix Mirror — Hacker News live session](assets/mirror-screenshot.png)
 
-→ sessionId: sess:a9d91302-98bd-46b4-a1aa-6a60d4dfaaed
-  confidence: 1.00  tier: hollow  tokens: 6318
-
-[Viewport: 1280x800]
-
-[center h:26]
-  [table h:26]
-    [tr h:16]
-      [td h:16]
-        [table h:16]
-          [tr y:2 h:12]
-            [td y:4 h:10]
-              [span y:4]
-                [2] a "Hacker News"              x:3   y:4   w:1270  h:0
-                [3] a "new"                      x:2   y:4   w:1276  h:0
-                [4] a "past"                     x:2   y:4   w:1276  h:0
-                [5] a "comments"                 x:2   y:4   w:1276  h:0
-                [6] a "ask"                      x:2   y:4   w:1276  h:0
-                [7] a "show"                     x:2   y:4   w:1276  h:0
-                [8] a "jobs"                     x:2   y:4   w:1276  h:0
-                [9] a "submit"                   x:2   y:4   w:1276  h:0
-              [span y:14]
-                [10] a "login"                   x:2   y:14  w:1272  h:0
-
-          [tr y:16]
-            [td y:16]
-              [span y:16]
-                [12] a "ArXiv Declares Independence from Cornell"   x:0  y:16  w:1280  h:0
-              [span y:16]
-                [14] a "bookstore-romeo"          x:0   y:16  w:1280  h:0
-                [15] a "2 hours ago"             x:0   y:16  w:1280  h:0
-                [17] a "17 comments"             x:0   y:16  w:1280  h:0
-
-          [tr y:17]
-            [td y:17]
-              [span y:17]
-                [19] a "Push events into a running session with channels"  x:0  y:17  w:1280  h:0
-              [span y:17]
-                [21] a "jasonjmcghee"            x:0   y:17  w:1280  h:0
-                [22] a "6 hours ago"             x:0   y:17  w:1280  h:0
-                [24] a "157 comments"            x:0   y:17  w:1280  h:0
-
-          [tr y:17]
-            [td y:17]
-              [span y:17]
-                [26] a "Google details new 24-hour process to sideload unverified Android apps"  x:0  y:17  w:1280  h:0
-              [span y:17]
-                [28] a "0xedb"                   x:0   y:17  w:1280  h:0
-                [29] a "13 hours ago"            x:0   y:17  w:1280  h:0
-                [31] a "746 comments"            x:0   y:17  w:1280  h:0
-
-          [tr y:17]
-            [td y:17]
-              [span y:17]
-                [33] a "Full Disclosure: A Third (and Fourth) Azure Sign-In Log Bypass Found"  x:0  y:17  w:1280  h:0
-              [span y:17]
-                [35] a "nyxgeek"                 x:0   y:17  w:1280  h:0
-                [36] a "5 hours ago"             x:0   y:17  w:1280  h:0
-                [38] a "18 comments"             x:0   y:17  w:1280  h:0
-
-          [tr y:17]
-            [td y:17]
-              [span y:17]
-                [40] a "Drugwars for the TI-82/83/83 Calculators (2011)"  x:0  y:17  w:1280  h:0
-              [span y:17]
-                [42] a "robotnikman"             x:0   y:18  w:1280  h:0
-                [43] a "6 hours ago"             x:0   y:18  w:1280  h:0
-                [45] a "46 comments"             x:0   y:18  w:1280  h:0
-
-          [tr y:18]
-            [td y:18]
-              [span y:18]
-                [47] a "Return of the Obra Dinn: spherical mapped dithering for a 1bpp first-person game"  x:0  y:18  w:1280  h:0
-              [span y:18]
-                [49] a "PaulHoule"               x:0   y:18  w:1280  h:0
-                [50] a "13 hours ago"            x:0   y:18  w:1280  h:0
-                [52] a "42 comments"             x:0   y:18  w:1280  h:0
-
-          [tr y:18]
-            [td y:18]
-              [span y:18]
-                [54] a "How the Turner twins are mythbusting modern technical apparel"  x:0  y:18  w:1280  h:0
-              [span y:18]
-                [56] a "greedo"                  x:0   y:18  w:1280  h:0
-                [57] a "10 hours ago"            x:0   y:18  w:1280  h:0
-                [59] a "94 comments"             x:0   y:18  w:1280  h:0
-
-          [tr y:19]
-            [td y:19]
-              [span y:19]
-                [68] a "Show HN: Three new Kitten TTS models – smallest less than 25MB"  x:0  y:19  w:1280  h:0
-              [span y:19]
-                [70] a "rohan_joshi"             x:0   y:19  w:1280  h:0
-                [71] a "14 hours ago"            x:0   y:19  w:1280  h:0
-                [73] a "146 comments"            x:0   y:19  w:1280  h:0
-
-          [tr y:19]
-            [td y:19]
-              [span y:19]
-                [89] a "Astral to Join OpenAI"   x:0   y:20  w:1280  h:0
-              [span y:20]
-                [91] a "ibraheemdev"             x:0   y:20  w:1280  h:0
-                [92] a "17 hours ago"            x:0   y:20  w:1280  h:0
-                [94] a "803 comments"            x:0   y:20  w:1280  h:0
-
-          … (228 total actionable elements)
-```
-
-The agent reads the GDG Spatial map. It decides what to do. It acts.
+The agent reads the [GDG Spatial](https://github.com/Badgerion/GDG-browser) map. It decides what to do. It acts.
 
 ---
 
@@ -165,14 +56,14 @@ The pipeline:
 2. **Happy DOM** — parses HTML, executes JavaScript, intercepts errors
 3. **CSS resolver** — extracts computed styles: flexbox, grid, block/inline, position, box model
 4. **Yoga layout engine** — calculates exact X/Y/W/H for every element. No screen. No GPU.
-5. **GDG Spatial** — converts coordinates to a structured spatial tree the AI reads
+5. [**GDG Spatial**](https://github.com/Badgerion/GDG-browser) — converts coordinates to a structured spatial tree the AI reads
 6. **Redis** — serializes session state (Brotli compressed) between steps
 
 ---
 
-## GDG Spatial
+## [GDG Spatial](https://github.com/Badgerion/GDG-browser)
 
-GDG Spatial is Hollow's perception format. It gives AI agents a token-efficient, action-indexed map of the page — structured for how models reason, not how humans see.
+[GDG Spatial](https://github.com/Badgerion/GDG-browser) is Hollow's perception format. It gives AI agents a token-efficient, action-indexed map of the page — structured for how models reason, not how humans see.
 
 ```
 [Viewport: 1280x800]
@@ -193,7 +84,7 @@ GDG Spatial is Hollow's perception format. It gives AI agents a token-efficient,
   [9] a "Contact"       col:3
 ```
 
-57–400 tokens per page. A screenshot costs 800–1500. GDG Spatial is 10–20x cheaper and carries semantic information a vision model has to infer.
+57–400 tokens per page. A screenshot costs 800–1500. [GDG Spatial](https://github.com/Badgerion/GDG-browser) is 10–20x cheaper and carries semantic information a vision model has to infer.
 
 ---
 
@@ -299,7 +190,7 @@ async function runAgent(task: string) {
       model: "claude-sonnet-4-20250514",
       max_tokens: 1024,
       system: `You are an AI agent operating a browser through Hollow.
-You receive a GDG Spatial map of the current page.
+You receive a [GDG Spatial](https://github.com/Badgerion/GDG-browser) map of the current page.
 Actionable elements have IDs like [1], [2], [3].
 
 Respond with JSON only:
@@ -446,7 +337,7 @@ Issues and PRs welcome. See [CONTRIBUTING.md](CONTRIBUTING.md).
 The most valuable contributions right now:
 - Happy DOM polyfills (TextEncoder, IntersectionObserver, ResizeObserver)
 - WebSocket schema Skills for popular apps
-- GDG Spatial ground-truth calibration data
+- [GDG Spatial](https://github.com/Badgerion/GDG-browser) ground-truth calibration data
 
 ---
 
