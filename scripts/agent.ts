@@ -1,8 +1,14 @@
 /**
- * Hollow agent loop — drives a browser session using Claude as the reasoning engine.
+ * Hollow agent loop — ContextAwarePlanningAgent pattern.
+ *
+ * Each step Claude reasons in four explicit phases before acting:
+ *   EVALUATE  what did the last action accomplish?
+ *   MEMORY    what relevant facts have I learned?
+ *   GOAL      what is my immediate next step?
+ *   ACTION    the exact JSON action to execute
  *
  * Usage:
- *   npx tsx scripts/agent.ts --url "https://example.com" --task "Find the main heading"
+ *   npx tsx scripts/agent.ts --task "What is the top story on Hacker News?"
  *
  * Environment:
  *   ANTHROPIC_API_KEY   required
@@ -13,234 +19,236 @@
 
 const HOLLOW_URL = process.env.HOLLOW_URL ?? 'https://hollow-tan-omega.vercel.app';
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY ?? '';
-const MAX_STEPS = 10;
+const MAX_STEPS = 15;
 const MODEL = 'claude-sonnet-4-20250514';
 
-const SYSTEM_PROMPT_BASE = `You are an AI agent operating a browser through Hollow, a serverless DOM interpreter.
-You receive a GDG Spatial map showing the current page layout. Actionable elements have IDs like [12], [13] etc.
+const SYSTEM_PROMPT = `You are an AI agent with access to Hollow, a serverless browser. \
+You perceive the web through GDG Spatial maps — structured spatial trees of page layouts.
 
-To take an action, respond with a JSON object on its own line:
-  { "action": "click", "elementId": 12 }
-  { "action": "fill", "elementId": 15, "value": "some text" }
-  { "action": "navigate", "url": "https://..." }
-  { "action": "done", "result": "your answer here" }
+On each step, reason in this exact structure:
+
+EVALUATE: [what did the last action accomplish? what changed on the page?]
+MEMORY: [what relevant facts have I learned so far towards the goal?]
+GOAL: [what is my immediate next step?]
+ACTION: [one JSON object from the list below]
+
+Available actions:
+{ "type": "navigate", "url": "https://..." }
+{ "type": "click", "elementId": 3 }
+{ "type": "fill", "elementId": 4, "value": "text" }
+{ "type": "scroll", "direction": "down" }
+{ "type": "done", "result": "your complete final answer here" }
 
 Rules:
-- Always respond with exactly one JSON action.
-- If the task is complete, use { "action": "done", "result": "..." }.
-- If the page does not have what you need, navigate or click to find it.
-- Do not explain — just output the JSON action.`;
+- Always output all four sections: EVALUATE, MEMORY, GOAL, ACTION.
+- ACTION must be a single valid JSON object on its own line.
+- Use { "type": "done" } only when you have a complete answer.
+- Your first action will always be a navigate — you decide the best URL.`;
 
-const SYSTEM_PROMPT_NO_URL = `${SYSTEM_PROMPT_BASE}
+// ─── Types ────────────────────────────────────────────────────────────────────
 
-You have access to Hollow, a serverless browser. To start browsing, navigate to a URL using:
-  { "action": "navigate", "url": "https://..." }
-You decide where to go based on the task. Your first action must always be a navigate.`;
+interface Action {
+  type: 'navigate' | 'click' | 'fill' | 'scroll' | 'done';
+  url?: string;
+  elementId?: number;
+  value?: string;
+  direction?: string;
+  result?: string;
+}
 
-// ─── CLI args ────────────────────────────────────────────────────────────────
+interface Message {
+  role: 'user' | 'assistant';
+  content: string;
+}
 
-function parseArgs(): { url: string | null; task: string } {
+// ─── CLI ─────────────────────────────────────────────────────────────────────
+
+function parseArgs(): string {
   const args = process.argv.slice(2);
-  const get = (flag: string) => {
-    const i = args.indexOf(flag);
-    return i !== -1 ? args[i + 1] : null;
-  };
-  const url  = get('--url');
-  const task = get('--task');
-  if (!task) {
-    console.error('Usage: npx tsx scripts/agent.ts --task "<task>" [--url "<url>"]');
+  const i = args.indexOf('--task');
+  if (i === -1 || !args[i + 1]) {
+    console.error('Usage: npx tsx scripts/agent.ts --task "<task>"');
     process.exit(1);
   }
-  return { url, task };
+  return args[i + 1];
 }
 
-// ─── Hollow API helpers ───────────────────────────────────────────────────────
+// ─── Hollow API ───────────────────────────────────────────────────────────────
 
-interface PerceiveResult {
-  sessionId: string;
-  gdgMap: string;
-  confidence: number;
-  tier: string;
-}
-
-async function perceive(url: string, sessionId?: string): Promise<PerceiveResult> {
+async function perceive(url: string, sessionId?: string): Promise<{ sessionId: string; gdgMap: string }> {
   const body: Record<string, string> = { url };
   if (sessionId) body.sessionId = sessionId;
-
   const res = await fetch(`${HOLLOW_URL}/api/perceive`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
-
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`/api/perceive ${res.status}: ${text}`);
-  }
-  return res.json() as Promise<PerceiveResult>;
+  if (!res.ok) throw new Error(`/api/perceive ${res.status}: ${await res.text()}`);
+  return res.json() as Promise<{ sessionId: string; gdgMap: string }>;
 }
 
-interface ActResult {
-  gdgMap?: string;
-  sessionId: string;
-}
-
-async function act(sessionId: string, action: AgentAction): Promise<ActResult> {
+async function act(sessionId: string, action: Action): Promise<{ gdgMap?: string }> {
   const res = await fetch(`${HOLLOW_URL}/api/act`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ sessionId, ...action }),
+    body: JSON.stringify({ sessionId, action }),
   });
-
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`/api/act ${res.status}: ${text}`);
-  }
-  return res.json() as Promise<ActResult>;
+  if (!res.ok) throw new Error(`/api/act ${res.status}: ${await res.text()}`);
+  return res.json() as Promise<{ gdgMap?: string }>;
 }
 
-// ─── Claude API helper ────────────────────────────────────────────────────────
+// ─── Claude API ───────────────────────────────────────────────────────────────
 
-async function askClaude(task: string, gdgMap: string, systemPrompt: string): Promise<AgentAction> {
+async function callClaude(messages: Message[]): Promise<string> {
   if (!ANTHROPIC_API_KEY) throw new Error('ANTHROPIC_API_KEY is not set');
-
-  const userMessage = gdgMap
-    ? `Task: ${task}\n\nCurrent page:\n${gdgMap}`
-    : `Task: ${task}`;
-
   const res = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
     headers: {
-      'Content-Type':         'application/json',
-      'x-api-key':            ANTHROPIC_API_KEY,
-      'anthropic-version':    '2023-06-01',
+      'Content-Type': 'application/json',
+      'x-api-key': ANTHROPIC_API_KEY,
+      'anthropic-version': '2023-06-01',
     },
     body: JSON.stringify({
       model: MODEL,
-      max_tokens: 256,
-      system: systemPrompt,
-      messages: [{ role: 'user', content: userMessage }],
+      max_tokens: 1024,
+      system: SYSTEM_PROMPT,
+      messages,
     }),
   });
-
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Anthropic API ${res.status}: ${text}`);
-  }
-
+  if (!res.ok) throw new Error(`Anthropic API ${res.status}: ${await res.text()}`);
   const data = await res.json() as { content: { type: string; text: string }[] };
-  const text = data.content.find(b => b.type === 'text')?.text ?? '';
-
-  return parseAction(text);
+  return data.content.find(b => b.type === 'text')?.text ?? '';
 }
 
-// ─── Action types ─────────────────────────────────────────────────────────────
+// ─── Parse action from reasoning text ────────────────────────────────────────
 
-type AgentAction =
-  | { action: 'click';    elementId: number }
-  | { action: 'fill';     elementId: number; value: string }
-  | { action: 'navigate'; url: string }
-  | { action: 'done';     result: string };
-
-function parseAction(text: string): AgentAction {
-  // Find the first JSON object in the response
-  const match = text.match(/\{[^}]+\}/);
-  if (!match) throw new Error(`No JSON action found in response:\n${text}`);
+function parseAction(text: string): Action {
+  // Extract the last JSON object in the response (after the ACTION: label)
+  const matches = [...text.matchAll(/\{[^{}]*"type"\s*:\s*"[^"]+[^{}]*\}/g)];
+  if (!matches.length) throw new Error(`No ACTION JSON found in:\n${text}`);
+  const raw = matches[matches.length - 1][0];
   try {
-    return JSON.parse(match[0]) as AgentAction;
+    return JSON.parse(raw) as Action;
   } catch {
-    throw new Error(`Failed to parse action JSON: ${match[0]}`);
+    throw new Error(`Failed to parse ACTION JSON: ${raw}`);
   }
 }
 
-// ─── Display helpers ──────────────────────────────────────────────────────────
+// ─── Display ──────────────────────────────────────────────────────────────────
 
-const HR = '─'.repeat(64);
+const HR = '─'.repeat(72);
 
-function printStep(step: number, gdgMap: string, action: AgentAction) {
+function printStep(step: number, reasoning: string, action: Action) {
   console.log(`\n${HR}`);
   console.log(`  Step ${step} / ${MAX_STEPS}`);
   console.log(HR);
-  console.log('\n  GDG Map received:\n');
-  // Indent each line for readability
-  for (const line of gdgMap.split('\n').slice(0, 30)) {
-    console.log(`    ${line}`);
+
+  // Print reasoning sections with light indentation
+  for (const line of reasoning.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    // Highlight the section headers
+    if (/^(EVALUATE|MEMORY|GOAL|ACTION):/.test(trimmed)) {
+      console.log(`\n  ${trimmed}`);
+    } else {
+      console.log(`    ${trimmed}`);
+    }
   }
-  if (gdgMap.split('\n').length > 30) {
-    console.log(`    … (${gdgMap.split('\n').length - 30} more lines)`);
-  }
-  console.log('\n  Action decided:\n');
-  console.log(`    ${JSON.stringify(action)}`);
-  console.log('');
+
+  console.log(`\n  → ${JSON.stringify(action)}`);
 }
 
 // ─── Main loop ────────────────────────────────────────────────────────────────
 
 async function main() {
-  const { url, task } = parseArgs();
-
-  const systemPrompt = url ? SYSTEM_PROMPT_BASE : SYSTEM_PROMPT_NO_URL;
+  const task = parseArgs();
 
   console.log(`\n${HR}`);
-  console.log('  Hollow Agent Loop');
+  console.log('  Hollow Agent — ContextAwarePlanningAgent');
   console.log(HR);
-  if (url) console.log(`  URL  : ${url}`);
   console.log(`  Task : ${task}`);
   console.log(`  Host : ${HOLLOW_URL}`);
+  console.log(`  Model: ${MODEL}`);
   console.log('');
 
+  const messages: Message[] = [];
   let sessionId: string | undefined;
   let gdgMap = '';
+  let stepCount = 0;
 
-  if (url) {
-    // Perceive the starting URL immediately
-    process.stdout.write('  Perceiving initial URL… ');
-    const result = await perceive(url);
-    sessionId = result.sessionId;
-    gdgMap    = result.gdgMap;
-    console.log(`done  (session ${sessionId})`);
-  } else {
-    console.log('  No URL provided — Claude will decide where to navigate.\n');
-  }
+  // Initial user message — no page yet, agent chooses where to navigate
+  messages.push({
+    role: 'user',
+    content: `Task: ${task}\n\nNo page loaded yet. Choose where to navigate.`,
+  });
 
-  // Main agent loop
   for (let step = 1; step <= MAX_STEPS; step++) {
-    // Ask Claude what to do next
-    const action = await askClaude(task, gdgMap, systemPrompt);
-    printStep(step, gdgMap, action);
+    stepCount = step;
 
-    if (action.action === 'done') {
-      console.log(`${HR}`);
+    // Ask Claude to reason and act
+    const reasoning = await callClaude(messages);
+    const action = parseAction(reasoning);
+
+    printStep(step, reasoning, action);
+
+    // Store the assistant turn in history
+    messages.push({ role: 'assistant', content: reasoning });
+
+    // ── Execute the action ────────────────────────────────────────────────────
+    if (action.type === 'done') {
+      console.log(`\n${HR}`);
       console.log('  RESULT');
       console.log(HR);
-      console.log(`\n  ${action.result}\n`);
+      console.log(`\n  ${action.result ?? '(no result provided)'}`);
+      console.log(`\n  Completed in ${stepCount} step${stepCount !== 1 ? 's' : ''}.\n`);
       return;
     }
 
-    if (action.action === 'navigate') {
-      process.stdout.write(`  Navigating to ${action.url}… `);
-      const nav = await perceive(action.url, sessionId);
-      sessionId = nav.sessionId;
-      gdgMap    = nav.gdgMap;
-      console.log(`done  (session ${sessionId})`);
-      continue;
+    let newMap: string | undefined;
+
+    if (action.type === 'navigate') {
+      if (!action.url) throw new Error('navigate action missing url');
+      process.stdout.write(`\n  Perceiving ${action.url} … `);
+      const result = await perceive(action.url, sessionId);
+      sessionId = result.sessionId;
+      newMap    = result.gdgMap;
+      gdgMap    = newMap;
+      console.log('done');
+    } else if (action.type === 'scroll') {
+      // Scroll: re-perceive the same session (DOM may have loaded lazy content)
+      if (!sessionId) throw new Error('no session — navigate first');
+      process.stdout.write('\n  Scrolling … ');
+      // scroll is handled server-side; fall back to re-perceiving same session
+      const result = await act(sessionId, action);
+      newMap  = result.gdgMap ?? gdgMap;
+      gdgMap  = newMap;
+      console.log('done');
+    } else {
+      // click / fill
+      if (!sessionId) throw new Error('no session — navigate first');
+      process.stdout.write(`\n  Acting (${action.type}) … `);
+      const result = await act(sessionId, action);
+      newMap  = result.gdgMap ?? gdgMap;
+      gdgMap  = newMap;
+      console.log('done');
     }
 
-    // click or fill — send to /api/act
-    if (!sessionId) throw new Error('No session — a navigate action must come first');
-    process.stdout.write(`  Acting (${action.action})… `);
-    const actResult = await act(sessionId, action);
-    if (actResult.gdgMap) gdgMap = actResult.gdgMap;
-    console.log('done');
+    // Feed the new page state back to Claude as the next user turn
+    messages.push({
+      role: 'user',
+      content: `Action executed. Current page:\n\n${gdgMap}`,
+    });
   }
 
+  // Hit max steps
   console.log(`\n${HR}`);
-  console.log(`  Reached max steps (${MAX_STEPS}). Final GDG map:\n`);
-  console.log(gdgMap);
+  console.log(`  Reached max steps (${MAX_STEPS}). Last page state:\n`);
+  for (const line of gdgMap.split('\n').slice(0, 20)) console.log(`  ${line}`);
+  if (gdgMap.split('\n').length > 20) console.log('  …');
   console.log('');
 }
 
 main().catch(err => {
-  console.error('\n  ✗ Agent error:', err instanceof Error ? err.message : err);
+  console.error('\n  ✗', err instanceof Error ? err.message : err);
   process.exit(1);
 });
