@@ -5,7 +5,7 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 type LogTag = 'SYS' | 'GDG' | 'AI' | 'ACT' | 'OK' | 'WARN' | 'ERR';
-type Tier = 'hollow' | 'partial' | 'vdom' | 'mobile-api' | 'cache';
+type Tier = 'hollow' | 'partial' | 'vdom' | 'mobile-api' | 'cache' | 'text';
 type ConnStatus = 'disconnected' | 'connecting' | 'connected' | 'polling' | 'error';
 
 interface LogEntry {
@@ -374,6 +374,7 @@ function TierPill({ tier }: { tier: Tier | null }) {
     vdom:         { bg: '#1e1b4b', text: '#a78bfa', border: '#4338ca' },
     'mobile-api': { bg: '#172554', text: '#60a5fa', border: '#1d4ed8' },
     cache:        { bg: '#422006', text: '#fbbf24', border: '#92400e' },
+    text:         { bg: '#052e16', text: '#86efac', border: '#15803d' },
   };
   const c = colors[tier] ?? colors.partial;
   return (

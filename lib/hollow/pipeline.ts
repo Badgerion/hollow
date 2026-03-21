@@ -31,6 +31,130 @@ import { getEmitter } from './sse-emitter';
 import type { HollowPerceiveResult, PerceiveRequest, SessionState } from './types';
 import type { LayoutBox } from './yoga-layout';
 
+// ─── Text-heavy page detection ───────────────────────────────────────────────
+
+function isTextHeavyPage(html: string, url: string): boolean {
+  const isLarge = html.length > 80_000;
+
+  const textDomains = [
+    'news.ycombinator.com',
+    'reddit.com',
+    'old.reddit.com',
+    'lobste.rs',
+    'tildes.net',
+  ];
+
+  let domain: string;
+  try {
+    domain = new URL(url).hostname.replace(/^www\./, '');
+  } catch {
+    return false;
+  }
+
+  const isKnownTextSite = textDomains.some(d => domain === d || domain.endsWith('.' + d));
+
+  const scriptCount = (html.match(/<script/gi) ?? []).length;
+  const htmlKb = html.length / 1024;
+  const isLowJS = scriptCount < 10 && htmlKb > 50;
+
+  return isKnownTextSite || (isLarge && isLowJS);
+}
+
+// ─── Lightweight text-tier GDG generator ─────────────────────────────────────
+
+function generateTextTierGDG(
+  html: string,
+  url: string,
+): { gdgMap: string; actionableCount: number; tokenEstimate: number } {
+  function stripTags(s: string): string {
+    return s
+      .replace(/<[^>]+>/g, ' ')
+      .replace(/&amp;/g, '&')
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&quot;/g, '"')
+      .replace(/&#039;/g, "'")
+      .replace(/&nbsp;/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  // Title
+  const titleMatch = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+  const title = titleMatch ? stripTags(titleMatch[1]).slice(0, 200) : '(no title)';
+
+  // Headings h1–h3
+  const headings: { level: string; text: string }[] = [];
+  const headingRe = /<(h[123])[^>]*>([\s\S]*?)<\/h[123]>/gi;
+  let hm: RegExpExecArray | null;
+  while ((hm = headingRe.exec(html)) !== null) {
+    const text = stripTags(hm[2]).slice(0, 150);
+    if (text) headings.push({ level: hm[1].toLowerCase(), text });
+    if (headings.length >= 30) break;
+  }
+
+  // Links — skip anchors and javascript: hrefs
+  const links: { text: string; href: string }[] = [];
+  const linkRe = /<a\s[^>]*href=(["'])([^"']+)\1[^>]*>([\s\S]*?)<\/a>/gi;
+  let lm: RegExpExecArray | null;
+  while ((lm = linkRe.exec(html)) !== null) {
+    const href = lm[2].trim();
+    const text = stripTags(lm[3]).slice(0, 120);
+    if (text && !href.startsWith('#') && !href.startsWith('javascript:')) {
+      links.push({ text, href });
+    }
+    if (links.length >= 200) break;
+  }
+
+  // Paragraphs
+  const paragraphs: string[] = [];
+  const paraRe = /<p[^>]*>([\s\S]*?)<\/p>/gi;
+  let pm: RegExpExecArray | null;
+  while ((pm = paraRe.exec(html)) !== null) {
+    const text = stripTags(pm[1]).slice(0, 400);
+    if (text.length > 20) paragraphs.push(text);
+    if (paragraphs.length >= 60) break;
+  }
+
+  let domain: string;
+  try {
+    domain = new URL(url).hostname.replace(/^www\./, '');
+  } catch {
+    domain = url;
+  }
+
+  const lines: string[] = [
+    `[TEXT: ${domain} — direct extraction]`,
+    `[Title: ${title}]`,
+    `[Mode: fast text extract — no layout engine]`,
+    '',
+  ];
+
+  if (headings.length > 0) {
+    lines.push('[Headings:]');
+    for (const h of headings) lines.push(`  ${h.level}: ${h.text}`);
+    lines.push('');
+  }
+
+  if (links.length > 0) {
+    lines.push('[Links:]');
+    links.forEach((l, i) => lines.push(`  [${i + 1}] a "${l.text}"  href:${l.href}`));
+    lines.push('');
+  }
+
+  if (paragraphs.length > 0) {
+    lines.push('[Content:]');
+    for (const p of paragraphs) lines.push(`  p: "${p}"`);
+  }
+
+  const gdgMap = lines.join('\n');
+  return {
+    gdgMap,
+    actionableCount: links.length,
+    tokenEstimate: Math.ceil(gdgMap.length / 4),
+  };
+}
+
 /** Wraps a step with named entry/exit logs and a rethrowing catch. */
 async function step<T>(name: string, fn: () => Promise<T> | T): Promise<T> {
   console.log(`[hollow/pipeline] ${name}: start`);
@@ -259,6 +383,60 @@ export async function perceiveCore(req: PerceiveRequest): Promise<HollowPerceive
     message: `Session initialized. url: ${finalUrl}`,
     timestamp: now(),
   });
+
+  // ── Text-tier fast path — skip Happy DOM + Yoga for large text-heavy pages ────
+  if (isTextHeavyPage(html, finalUrl)) {
+    console.log(`[hollow/pipeline] text-tier fast path: url=${finalUrl} htmlKb=${(html.length / 1024).toFixed(1)}`);
+    emit.emitLog(sessionId, 'SYS', 'Text-heavy page detected — using fast text extraction (no layout engine)');
+
+    const textResult = generateTextTierGDG(html, finalUrl);
+    const confidence = 0.95;
+    const tier = 'text' as const;
+
+    const sessionState: SessionState = {
+      ...(existingSession
+        ? bumpSession(existingSession, html)
+        : newSession(sessionId, finalUrl, html)),
+      gdgMap: textResult.gdgMap,
+      confidence,
+      tier,
+      tokenEstimate: textResult.tokenEstimate,
+    };
+
+    await step('2t-session-save', () => saveSession(sessionState));
+
+    const ts = now();
+    emit.emit(sessionId, 'dom_delta', { html, url: finalUrl });
+    emit.emit(sessionId, 'gdg_map', {
+      map: textResult.gdgMap,
+      confidence,
+      tier,
+      actionableCount: textResult.actionableCount,
+      tokenEstimate: textResult.tokenEstimate,
+      timestamp: ts,
+    });
+    emit.emit(sessionId, 'confidence', { score: confidence, tier, deductions: [], timestamp: ts });
+    emit.emit(sessionId, 'log_entry', {
+      tag: 'GDG',
+      message: `Text extraction complete. ${textResult.actionableCount} links. ${textResult.tokenEstimate} tokens. Confidence: ${confidence}. Tier: text.`,
+      timestamp: ts,
+    });
+    emit.emit(sessionId, 'tier', { tier });
+
+    console.log(`[hollow/pipeline] complete sessionId=sess:${sessionId} tier=text links=${textResult.actionableCount} tokens=${textResult.tokenEstimate}`);
+    return {
+      sessionId: `sess:${sessionId}`,
+      gdgMap: textResult.gdgMap,
+      domDelta: html,
+      confidence,
+      confidenceDeductions: [],
+      jsErrors: [],
+      tier,
+      elementCount: 0,
+      actionableCount: textResult.actionableCount,
+      tokenEstimate: textResult.tokenEstimate,
+    };
+  }
 
   // ── Step 2: Happy DOM — parse HTML, execute JS ───────────────────────────────
   const { window, document, vitality, jsExecutionTimedOut, reactDetected } = await step('2-happy-dom', () =>
