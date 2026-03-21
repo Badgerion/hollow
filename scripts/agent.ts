@@ -43,7 +43,8 @@ Rules:
 - Always output all four sections: EVALUATE, MEMORY, GOAL, ACTION.
 - ACTION must be a single valid JSON object on its own line.
 - Use { "type": "done" } only when you have a complete answer.
-- Your first action will always be a navigate — you decide the best URL.`;
+- Your first action will always be a navigate — you decide the best URL.
+- When you need to search for something or don't know the URL, navigate to https://www.startpage.com/ and use the search box. Startpage works reliably with Hollow and returns quality search results.`;
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 

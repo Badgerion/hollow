@@ -80,7 +80,10 @@ function looksLikeUrl(s: string): boolean {
 }
 
 // Inject badge + highlight script into Ghost DOM HTML
-function injectHollowScript(html: string): string {
+function injectHollowScript(html: string, sessionUrl?: string): string {
+  const baseTag = sessionUrl && sessionUrl !== '—'
+    ? `<base href="${sessionUrl}" target="_blank">`
+    : '';
   const script = `<script>
 (function(){
   var SEL='a[href],button,input,select,textarea,[role="button"],[onclick],[tabindex]:not([tabindex="-1"])';
@@ -119,8 +122,19 @@ function injectHollowScript(html: string): string {
   else init();
 })();
 <\/script>`;
-  if (html.includes('</body>')) return html.replace('</body>', script + '</body>');
-  return html + script;
+  // Inject <base> before </head> if present, otherwise prepend to html
+  let result = html;
+  if (baseTag) {
+    if (result.includes('</head>')) {
+      result = result.replace('</head>', baseTag + '</head>');
+    } else if (result.includes('<head>')) {
+      result = result.replace('<head>', '<head>' + baseTag);
+    } else {
+      result = baseTag + result;
+    }
+  }
+  if (result.includes('</body>')) return result.replace('</body>', script + '</body>');
+  return result + script;
 }
 
 // ─── API helper ───────────────────────────────────────────────────────────────
@@ -351,7 +365,7 @@ function StartScreen() {
           value={input}
           onChange={e => { setInput(e.target.value); setError(null); }}
           onKeyDown={e => e.key === 'Enter' && handleStart()}
-          placeholder="https://example.com — or paste raw HTML…"
+          placeholder="https://www.startpage.com/ — or paste raw HTML…"
           disabled={loading}
           style={{
             flex: 1,
@@ -731,7 +745,7 @@ export function MatrixMirror({ sessionId }: { sessionId: string | null }) {
             value={navInput}
             onChange={e => { setNavInput(e.target.value); setNavError(null); }}
             onKeyDown={e => e.key === 'Enter' && handleNavigate()}
-            placeholder={currentUrl === '—' ? 'https://example.com or paste HTML…' : currentUrl}
+            placeholder={currentUrl === '—' ? 'https://www.startpage.com/ or paste HTML…' : currentUrl}
             disabled={navLoading}
             style={{
               flex: 1,
@@ -856,7 +870,7 @@ export function MatrixMirror({ sessionId }: { sessionId: string | null }) {
           ) : domHtml ? (
             <iframe
               ref={iframeRef}
-              srcDoc={injectHollowScript(domHtml)}
+              srcDoc={injectHollowScript(domHtml, currentUrl)}
               sandbox="allow-scripts"
               style={{ flex: 1, border: 'none', background: '#fff', width: '100%' }}
             />
