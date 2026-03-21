@@ -328,10 +328,25 @@ export async function perceive(req: PerceiveRequest): Promise<HollowPerceiveResu
   }
 
   // ── Steps 3–4: CSS + Yoga Flexbox layout ────────────────────────────────────
-  const { layoutMap, deductions: layoutDeductions } = await step('3-yoga-layout', () =>
-    calculateLayout(body as unknown as Element, window)
-  );
-  console.log(`[hollow/pipeline] 3-yoga-layout: mapped=${layoutMap.size} deductions=${layoutDeductions.length}`);
+  let layoutMap: Awaited<ReturnType<typeof calculateLayout>>['layoutMap'];
+  let layoutDeductions: Awaited<ReturnType<typeof calculateLayout>>['deductions'];
+  try {
+    const layoutResult = await step('3-yoga-layout', () =>
+      calculateLayout(body as unknown as Element, window)
+    );
+    layoutMap = layoutResult.layoutMap;
+    layoutDeductions = layoutResult.deductions;
+    console.log(`[hollow/pipeline] 3-yoga-layout: mapped=${layoutMap.size} deductions=${layoutDeductions.length}`);
+  } catch (err) {
+    console.warn(`[hollow/pipeline] 3-yoga-layout: layout failed, continuing with empty map — ${err instanceof Error ? err.message : err}`);
+    layoutMap = new Map();
+    layoutDeductions = [{ reason: 'yoga layout failed (CSS parse error)', amount: 0.25 }];
+    emit.emit(sessionId, 'log_entry', {
+      tag: 'WARN',
+      message: 'Layout engine failed — falling back to structure-only map (lower confidence)',
+      timestamp: now(),
+    });
+  }
 
   // ── Step 5: CSS Grid resolver ─────────────────────────────────────────────────
   const gridLayouts = new Map<Element, LayoutBox>();
