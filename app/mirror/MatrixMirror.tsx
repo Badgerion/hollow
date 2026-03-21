@@ -79,7 +79,7 @@ function looksLikeUrl(s: string): boolean {
   return t.startsWith('http://') || t.startsWith('https://');
 }
 
-// Inject badge + highlight script into Ghost DOM HTML
+// Inject badge + highlight + click-intercept script into Ghost DOM HTML
 function injectHollowScript(html: string, sessionUrl?: string): string {
   const baseTag = sessionUrl && sessionUrl !== '—'
     ? `<base href="${sessionUrl}" target="_blank">`
@@ -95,6 +95,8 @@ function injectHollowScript(html: string, sessionUrl?: string): string {
       var b=document.createElement('span');
       b.textContent=i+1;
       b.setAttribute('data-hid',i+1);
+      b.setAttribute('data-hollow-id',i+1);
+      el.setAttribute('data-hollow-id',i+1);
       b.style.cssText='position:absolute;top:-9px;left:0;background:#0d9488;color:#fff;'+
         'font:700 9px/1 monospace;padding:1px 4px;border-radius:2px;z-index:2147483647;'+
         'pointer-events:none;white-space:nowrap;';
@@ -103,6 +105,23 @@ function injectHollowScript(html: string, sessionUrl?: string): string {
       el.style.zIndex=el.style.zIndex||'1';
       el.appendChild(b);
     });
+    // Intercept all clicks — send to parent MatrixMirror
+    document.addEventListener('click',function(e){
+      var el=e.target.closest('a,button,[role="button"]');
+      if(!el)return;
+      e.preventDefault();
+      e.stopPropagation();
+      var hollowId=el.dataset&&el.dataset.hollowId
+        ?parseInt(el.dataset.hollowId)
+        :null;
+      var href=el.getAttribute('href')||null;
+      window.parent.postMessage({
+        type:'hollow-click',
+        hollowId:hollowId,
+        href:href,
+        text:(el.textContent||'').trim().slice(0,80)
+      },'*');
+    },true);
     window.addEventListener('message',function(e){
       if(!e.data||e.data.type!=='hollow:highlight')return;
       document.querySelectorAll('[data-hollow-active]').forEach(function(el){
@@ -154,6 +173,14 @@ async function callPerceive(input: string, sessionId?: string): Promise<{ sessio
   const json = await res.json();
   if (!res.ok) throw new Error(json.error ?? `HTTP ${res.status}`);
   return json as { sessionId: string };
+}
+
+async function callAct(sessionId: string, action: { type: string; elementId?: number; url?: string }): Promise<void> {
+  await fetch('/api/act', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sessionId, action }),
+  });
 }
 
 // ─── Sub-components ───────────────────────────────────────────────────────────
@@ -496,6 +523,27 @@ export function MatrixMirror({ sessionId }: { sessionId: string | null }) {
       return [...prev, { id, ...entry }];
     });
   }, []);
+
+  // Ghost DOM click interception — links drive Hollow session
+  useEffect(() => {
+    if (!sessionId) return;
+    const handler = async (e: MessageEvent) => {
+      if (e.data?.type !== 'hollow-click') return;
+      const { hollowId, href, text } = e.data as { hollowId: number | null; href: string | null; text: string };
+      if (hollowId) {
+        addEntry({ tag: 'ACT', message: `Ghost click → element #${hollowId}${text ? ` "${text}"` : ''}`, timestamp: new Date().toISOString() });
+        await callAct(sessionId, { type: 'click', elementId: hollowId });
+      } else if (href) {
+        const absolute = href.startsWith('http')
+          ? href
+          : currentUrl !== '—' ? new URL(href, currentUrl).toString() : href;
+        addEntry({ tag: 'SYS', message: `Ghost nav → ${absolute}`, timestamp: new Date().toISOString() });
+        await callPerceive(absolute, sessionId);
+      }
+    };
+    window.addEventListener('message', handler);
+    return () => window.removeEventListener('message', handler);
+  }, [sessionId, currentUrl, addEntry]);
 
   // SSE connection + polling fallback
   useEffect(() => {
