@@ -16,7 +16,7 @@
 
 import { v4 as uuidv4 } from 'uuid';
 import { fetchUrl, NetworkFetchError } from './network';
-import { tryMobileAPIBypass, tryCacheBypass, isReadOnlyUrl } from './router';
+import { tryMobileAPIBypass, tryCacheBypass, isReadOnlyUrl, shouldTryCacheFirst, isConsentWall } from './router';
 import { buildDOM } from './dom';
 import { resolveStyles } from './css-resolver';
 import { calculateLayout, calculateSubtreeLayout } from './yoga-layout';
@@ -40,6 +40,56 @@ async function step<T>(name: string, fn: () => Promise<T> | T): Promise<T> {
     console.error(`[hollow/pipeline] ${name}: FAILED —`, err);
     throw err;
   }
+}
+
+// ─── Shared: run DOM+layout+GDG on cached HTML ───────────────────────────────
+
+async function processCachedHtml(
+  cacheResult: import('./router').CacheResult,
+  finalUrl: string,
+  sessionId: string,
+  existingSession: import('./types').SessionState | null,
+): Promise<{
+  gdgMap: string; html: string; confidence: number; tier: 'cache';
+  elementCount: number; actionableCount: number; tokenEstimate: number;
+  jsErrors: import('./types').JSError[];
+  deductions: import('./types').ConfidenceDeduction[];
+}> {
+  const { window: cWin, document: cDoc, vitality: cVit } =
+    await buildDOM(cacheResult.html, finalUrl);
+
+  const { layoutMap: cLayoutMap, deductions: cDeductions } =
+    await calculateLayout(cDoc.body as unknown as Element, cWin);
+
+  const cGdg = generateGDGSpatial(
+    cDoc.body as unknown as Element, cWin, cLayoutMap,
+    new Map(), new Map(), new Map()
+  );
+
+  const source = cacheResult.source === 'bing' ? 'Bing Cache' : 'Wayback Machine';
+  const cacheHeader = `[CACHE: ${source} snapshot from ${cacheResult.cacheDate}]\n[Note: content may be out of date]\n\n`;
+  const gdgMap = cacheHeader + cGdg.map;
+  const confidence = 0.70;
+
+  cWin.happyDOM.close();
+
+  const sessionState: import('./types').SessionState = {
+    ...(existingSession
+      ? bumpSession(existingSession, cacheResult.html)
+      : newSession(sessionId, finalUrl, cacheResult.html)),
+    gdgMap,
+    confidence,
+    tier: 'cache',
+    tokenEstimate: cGdg.tokenEstimate,
+  };
+  await saveSession(sessionState);
+
+  return {
+    gdgMap, html: cacheResult.html, confidence, tier: 'cache',
+    elementCount: cLayoutMap.size, actionableCount: cGdg.actionableCount,
+    tokenEstimate: cGdg.tokenEstimate, jsErrors: cVit.getErrors(),
+    deductions: cDeductions,
+  };
 }
 
 export async function perceive(req: PerceiveRequest): Promise<HollowPerceiveResult> {
@@ -112,6 +162,28 @@ export async function perceive(req: PerceiveRequest): Promise<HollowPerceiveResu
         actionableCount: 0,
         tokenEstimate: mobileResult.tokenEstimate,
       };
+    }
+
+    // ── Step 1c: Cache-First — skip direct fetch for known paywalled domains ─────
+    if (shouldTryCacheFirst(req.url!)) {
+      const hostname = new URL(req.url!).hostname.replace(/^www\./, '');
+      emit.emitLog(sessionId, 'SYS', `Cache-first route: trying cached version of ${hostname}`);
+      const cacheResult = await step('1c-cache-first', () => tryCacheBypass(req.url!, 'Cache first'));
+      if (cacheResult) {
+        const cached = await step('1c-cache-pipeline', () =>
+          processCachedHtml(cacheResult, req.url!, sessionId, existingSession)
+        );
+        const ts = now();
+        const source = cacheResult.source === 'bing' ? 'Bing Cache' : 'Wayback Machine';
+        emit.emit(sessionId, 'dom_delta', { html: cached.html, url: req.url! });
+        emit.emit(sessionId, 'gdg_map', { map: cached.gdgMap, confidence: cached.confidence, tier: 'cache', actionableCount: cached.actionableCount, tokenEstimate: cached.tokenEstimate, timestamp: ts });
+        emit.emit(sessionId, 'confidence', { score: cached.confidence, tier: 'cache', deductions: cached.deductions, timestamp: ts });
+        emit.emit(sessionId, 'log_entry', { tag: 'GDG', message: `Cache-first hit: ${source} snapshot from ${cacheResult.cacheDate}. ${cached.tokenEstimate} tokens.`, timestamp: ts });
+        emit.emit(sessionId, 'tier', { tier: 'cache' });
+        console.log(`[hollow/pipeline] complete sessionId=sess:${sessionId} tier=cache source=${cacheResult.source}`);
+        return { sessionId: `sess:${sessionId}`, gdgMap: cached.gdgMap, domDelta: cached.html, confidence: cached.confidence, confidenceDeductions: cached.deductions, jsErrors: cached.jsErrors, tier: 'cache', elementCount: cached.elementCount, actionableCount: cached.actionableCount, tokenEstimate: cached.tokenEstimate };
+      }
+      // Cache miss — fall through to direct fetch
     }
 
     emit.emitLog(sessionId, 'SYS', `Fetching ${req.url}`);
@@ -330,80 +402,30 @@ export async function perceive(req: PerceiveRequest): Promise<HollowPerceiveResu
   console.log(`[hollow/pipeline] 7-confidence: score=${confidence} tier=${tier}`);
 
   // ── Step 7b: Cache Bypass ─────────────────────────────────────────────────────
-  // Runs when the direct pipeline produced low confidence on a read-only URL.
-  // Re-runs the DOM+layout+GDG steps on cached HTML so the agent gets usable content.
-  if (confidence < 0.5 && !req.html && isReadOnlyUrl(finalUrl)) {
-    const cacheResult = await step('7b-cache-bypass', () => tryCacheBypass(finalUrl));
+  // Triggers when: (a) confidence < 0.5 on a read-only URL, OR
+  //                (b) GDG map looks like a consent/cookie wall.
+  const consentWall = !req.html && isConsentWall(gdg.map);
+  if (consentWall) {
+    emit.emit(sessionId, 'log_entry', { tag: 'WARN', message: 'Consent wall detected — attempting cache bypass.', timestamp: now() });
+    console.log('[hollow/pipeline] 7b: consent wall detected, triggering cache bypass');
+  }
+
+  if (!req.html && (confidence < 0.5 || consentWall) && isReadOnlyUrl(finalUrl)) {
+    const cacheResult = await step('7b-cache-bypass', () => tryCacheBypass(finalUrl, 'Cache fallback'));
     if (cacheResult) {
-      window.happyDOM.close(); // close the low-confidence window
-
-      const { window: cWin, document: cDoc, vitality: cVit, jsExecutionTimedOut: cTimed } =
-        await step('7b-cache-dom', () => buildDOM(cacheResult.html, finalUrl));
-
-      if (cTimed) {
-        console.log('[hollow/pipeline] 7b-cache-dom: JS execution timed out on cached HTML');
-      }
-
-      const { layoutMap: cLayoutMap, deductions: cDeductions } =
-        await step('7b-cache-yoga', () =>
-          calculateLayout(cDoc.body as unknown as Element, cWin)
-        );
-
-      const cGdg = generateGDGSpatial(
-        cDoc.body as unknown as Element, cWin, cLayoutMap,
-        new Map(), new Map(), new Map()
+      window.happyDOM.close();
+      const cached = await step('7b-cache-pipeline', () =>
+        processCachedHtml(cacheResult, finalUrl, sessionId, existingSession)
       );
-
-      const source = cacheResult.source === 'bing' ? 'Bing Cache' : 'Wayback Machine';
-      const cacheHeader = `[CACHE: ${source} snapshot from ${cacheResult.cacheDate}]\n[Note: content may be out of date]\n\n`;
-      const cGdgMap = cacheHeader + cGdg.map;
-      const cConfidence = 0.70;
-      const cTier = 'cache' as const;
-
-      cWin.happyDOM.close();
-
-      const cSessionState: SessionState = {
-        ...(existingSession
-          ? bumpSession(existingSession, cacheResult.html)
-          : newSession(sessionId, finalUrl, cacheResult.html)),
-        gdgMap: cGdgMap,
-        confidence: cConfidence,
-        tier: cTier,
-        tokenEstimate: cGdg.tokenEstimate,
-      };
-      await step('8-session-save', () => saveSession(cSessionState));
-
       const cTs = now();
-      emit.emit(sessionId, 'dom_delta', { html: cacheResult.html, url: finalUrl });
-      emit.emit(sessionId, 'gdg_map', {
-        map: cGdgMap,
-        confidence: cConfidence,
-        tier: cTier,
-        actionableCount: cGdg.actionableCount,
-        tokenEstimate: cGdg.tokenEstimate,
-        timestamp: cTs,
-      });
-      emit.emit(sessionId, 'confidence', { score: cConfidence, tier: cTier, deductions: cDeductions, timestamp: cTs });
-      emit.emit(sessionId, 'log_entry', {
-        tag: 'GDG',
-        message: `Cache bypass: ${source} snapshot from ${cacheResult.cacheDate}. ${cGdg.tokenEstimate} tokens. Confidence: ${cConfidence}.`,
-        timestamp: cTs,
-      });
-      emit.emit(sessionId, 'tier', { tier: cTier });
-
+      const source = cacheResult.source === 'bing' ? 'Bing Cache' : 'Wayback Machine';
+      emit.emit(sessionId, 'dom_delta', { html: cached.html, url: finalUrl });
+      emit.emit(sessionId, 'gdg_map', { map: cached.gdgMap, confidence: cached.confidence, tier: 'cache', actionableCount: cached.actionableCount, tokenEstimate: cached.tokenEstimate, timestamp: cTs });
+      emit.emit(sessionId, 'confidence', { score: cached.confidence, tier: 'cache', deductions: cached.deductions, timestamp: cTs });
+      emit.emit(sessionId, 'log_entry', { tag: 'GDG', message: `Cache bypass: ${source} snapshot from ${cacheResult.cacheDate}. ${cached.tokenEstimate} tokens. Confidence: ${cached.confidence}.`, timestamp: cTs });
+      emit.emit(sessionId, 'tier', { tier: 'cache' });
       console.log(`[hollow/pipeline] complete sessionId=sess:${sessionId} tier=cache source=${cacheResult.source}`);
-      return {
-        sessionId: `sess:${sessionId}`,
-        gdgMap: cGdgMap,
-        domDelta: cacheResult.html,
-        confidence: cConfidence,
-        confidenceDeductions: cDeductions,
-        jsErrors: cVit.getErrors(),
-        tier: cTier,
-        elementCount: cLayoutMap.size,
-        actionableCount: cGdg.actionableCount,
-        tokenEstimate: cGdg.tokenEstimate,
-      };
+      return { sessionId: `sess:${sessionId}`, gdgMap: cached.gdgMap, domDelta: cached.html, confidence: cached.confidence, confidenceDeductions: cached.deductions, jsErrors: cached.jsErrors, tier: 'cache', elementCount: cached.elementCount, actionableCount: cached.actionableCount, tokenEstimate: cached.tokenEstimate };
     }
   }
 

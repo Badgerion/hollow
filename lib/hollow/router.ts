@@ -6,10 +6,14 @@
  *   probes the API endpoint, and returns a structured GDG map if the API
  *   is reachable. Skips HTML fetch + DOM execution entirely.
  *
- * Route 2 — Cache Bypass:
- *   Runs AFTER the pipeline if confidence < 0.5 and the URL looks read-only.
- *   Tries Bing cache first, then Wayback Machine. Returns the cached HTML
- *   for the caller to re-run through the DOM+layout pipeline.
+ * Route 2 — Cache-First Bypass:
+ *   Runs BEFORE the Happy DOM pipeline for known paywalled/WAF-heavy domains.
+ *   Tries Wayback Machine first, then Bing cache. If found, pipes cached HTML
+ *   through the standard DOM+layout pipeline and returns tier: 'cache'.
+ *
+ * Route 3 — Cache Fallback:
+ *   Runs AFTER the pipeline if confidence < 0.5 or a consent wall is detected
+ *   on a read-only URL. Same cache fetch logic as Route 2.
  */
 
 // ─── Mobile API Registry ──────────────────────────────────────────────────────
@@ -154,6 +158,49 @@ function buildMobileAPIGDGMap(domain: string, config: MobileAPIConfig): string {
   ].join('\n');
 }
 
+// ─── Cache-First Domains ──────────────────────────────────────────────────────
+// These domains are known to WAF-block or paywall direct fetches.
+// For them, cache is attempted BEFORE the Happy DOM pipeline.
+
+const CACHE_FIRST_DOMAINS = new Set([
+  'techcrunch.com', 'arstechnica.com', 'wired.com', 'theverge.com',
+  'wsj.com', 'ft.com', 'bloomberg.com', 'thenextweb.com', 'venturebeat.com',
+  'nytimes.com', 'washingtonpost.com', 'economist.com', 'businessinsider.com',
+  'theatlantic.com', 'technologyreview.com', 'forbes.com', 'fortune.com',
+]);
+
+export function shouldTryCacheFirst(url: string): boolean {
+  try {
+    const hostname = new URL(url).hostname.replace(/^www\./, '');
+    return CACHE_FIRST_DOMAINS.has(hostname) ||
+      Array.from(CACHE_FIRST_DOMAINS).some(d => hostname.endsWith('.' + d));
+  } catch {
+    return false;
+  }
+}
+
+// ─── Consent Wall Detection ───────────────────────────────────────────────────
+// Detects when the pipeline returned a consent/cookie overlay instead of content.
+
+const CONSENT_PATTERNS = [
+  /\bcookies?\b/i,
+  /\bconsent\b/i,
+  /\baccept all\b/i,
+  /\bprivacy policy\b/i,
+  /\bGDPR\b/i,
+  /\bwe use cookies\b/i,
+  /\bcookie settings\b/i,
+  /\bmanage (preferences|cookies)\b/i,
+];
+
+export function isConsentWall(gdgMap: string): boolean {
+  // Count actionable elements — consent walls have very few
+  const actionableCount = (gdgMap.match(/^\[\d+\]/mg) ?? []).length;
+  if (actionableCount > 10) return false; // real page, not just a wall
+  const matchCount = CONSENT_PATTERNS.filter(p => p.test(gdgMap)).length;
+  return matchCount >= 2;
+}
+
 // ─── Cache Bypass ─────────────────────────────────────────────────────────────
 
 const READ_ONLY_PATH_PATTERNS = [
@@ -187,14 +234,22 @@ export interface CacheResult {
   source: 'bing' | 'wayback';
 }
 
-export async function tryCacheBypass(url: string): Promise<CacheResult | null> {
-  // Bing cache first — faster and often fresher
+export async function tryCacheBypass(url: string, label = 'Cache bypass'): Promise<CacheResult | null> {
+  let hostname = url;
+  try { hostname = new URL(url).hostname.replace(/^www\./, ''); } catch { /* ok */ }
+
+  // Wayback Machine first — most reliable for paywalled content
+  console.log(`[hollow/router] ${label}: trying Wayback Machine for ${hostname}`);
+  const wayback = await tryWaybackCache(url);
+  if (wayback) return wayback;
+
+  // Bing cache fallback
+  console.log(`[hollow/router] ${label}: no Wayback snapshot, trying Bing cache`);
   const bing = await tryBingCache(url);
   if (bing) return bing;
 
-  // Wayback Machine fallback
-  const wayback = await tryWaybackCache(url);
-  return wayback;
+  console.log(`[hollow/router] ${label}: both failed, falling through to direct fetch`);
+  return null;
 }
 
 async function tryBingCache(url: string): Promise<CacheResult | null> {
@@ -219,7 +274,7 @@ async function tryBingCache(url: string): Promise<CacheResult | null> {
       return null;
     }
 
-    console.log('[hollow/router] Cache bypass: Bing cache hit');
+    console.log(`[hollow/router] Cache hit: Bing cache for ${new URL(url).hostname.replace(/^www\./, '')}`);
     return {
       html,
       cacheUrl,
@@ -250,7 +305,7 @@ async function tryWaybackCache(url: string): Promise<CacheResult | null> {
 
     const closest = data.archived_snapshots?.closest;
     if (!closest?.available || !closest.url || !closest.timestamp) {
-      console.log('[hollow/router] Cache bypass: no Wayback snapshot found');
+      console.log(`[hollow/router] Cache miss: no Wayback snapshot for ${new URL(url).hostname.replace(/^www\./, '')}`);
       return null;
     }
 
@@ -273,10 +328,10 @@ async function tryWaybackCache(url: string): Promise<CacheResult | null> {
     if (!archiveRes.ok) return null;
     const html = await archiveRes.text();
 
-    console.log(`[hollow/router] Cache bypass: Wayback snapshot ${cacheDate}`);
+    console.log(`[hollow/router] Cache hit: Wayback snapshot ${cacheDate} for ${new URL(url).hostname.replace(/^www\./, '')}`);
     return { html, cacheUrl: archiveUrl, cacheDate, source: 'wayback' };
   } catch {
-    console.log('[hollow/router] Cache bypass: no cache found, proceeding with direct fetch');
+    console.log('[hollow/router] Cache miss: Wayback fetch failed');
     return null;
   }
 }
