@@ -374,9 +374,25 @@ export async function calculateSubtreeLayout(
 
 // ─── Main entry point ─────────────────────────────────────────────────────────
 
+// Maximum DOM elements before skipping Yoga layout to avoid serverless timeouts.
+// Large pages (HN comment threads, Reddit etc.) can have 1000+ elements.
+// Above this threshold we return an empty layoutMap; GDG Spatial falls back to
+// tree-structure-only mode (no x/y positions, lower confidence but no timeout).
+const MAX_YOGA_ELEMENTS = 400;
+
 export async function calculateLayout(body: Element, win: Window): Promise<YogaResult> {
   const nodeMap = new Map<Element, NodeEntry>();
   const deductions: ConfidenceDeduction[] = [];
+
+  // Fast element count guard — querySelectorAll is synchronous and cheap
+  const totalElements = body.querySelectorAll('*').length;
+  if (totalElements > MAX_YOGA_ELEMENTS) {
+    console.log(
+      `[hollow/yoga] skipping layout — ${totalElements} elements exceeds MAX_YOGA_ELEMENTS=${MAX_YOGA_ELEMENTS}`
+    );
+    deductions.push({ reason: `page too large for layout (${totalElements} elements) — structure-only map`, amount: 0.15 });
+    return { layoutMap: new Map<Element, LayoutBox>(), deductions };
+  }
 
   const root = Yoga.Node.create();
   root.setWidth(VIEWPORT_WIDTH);
