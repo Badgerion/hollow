@@ -95,16 +95,27 @@ export function resolveStyles(el: Element, win: Window): ComputedStyles {
   }
 
   function get(prop: string): string {
-    // Prefer computed style
+    // Prefer computed style. Happy DOM's parseCSSRules can throw when the DOM
+    // is partially-initialised (e.g. after the JS execution timeout fires).
+    // On any throw, null out `computed` so all remaining reads in this call
+    // fall through to inline style without retrying the broken cascade.
     if (computed) {
-      const val = computed.getPropertyValue(prop);
-      if (val && val !== '') return val.trim();
+      try {
+        const val = computed.getPropertyValue(prop);
+        if (val && val !== '') return val.trim();
+      } catch {
+        computed = null;
+      }
     }
     // Fall back to inline style
     const el2 = el as unknown as HTMLElement;
     if ('style' in el2) {
-      const val = (el2.style as CSSStyleDeclaration).getPropertyValue(prop);
-      if (val && val !== '') return val.trim();
+      try {
+        const val = (el2.style as CSSStyleDeclaration).getPropertyValue(prop);
+        if (val && val !== '') return val.trim();
+      } catch {
+        // ignore
+      }
     }
     return '';
   }

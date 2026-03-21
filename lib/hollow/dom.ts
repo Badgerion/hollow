@@ -70,6 +70,32 @@ export async function buildDOM(html: string, url: string): Promise<DOMResult> {
   if (!win.TextEncoder) win.TextEncoder = TextEncoder;   // Node global
   if (!win.TextDecoder) win.TextDecoder = TextDecoder;   // Node global
 
+  // PerformanceObserver — missing in Happy DOM; needed by Next.js turbopack
+  // runtime and other performance-tracking bundles. No-op: we don't care about
+  // performance metrics, only DOM structure.
+  if (!win.PerformanceObserver) {
+    win.PerformanceObserver = class PerformanceObserver {
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      constructor(_cb: unknown) {}
+      observe()      {}
+      disconnect()   {}
+      takeRecords()  { return []; }
+    };
+  }
+
+  // Promise.prototype.finally — Happy DOM's Promise implementation may omit it.
+  // Stripe and other Next.js bundles call .finally() on promise chains.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const WinPromise = (win.Promise ?? Promise) as any;
+  if (WinPromise && !WinPromise.prototype.finally) {
+    WinPromise.prototype.finally = function <T>(fn: () => unknown): Promise<T> {
+      return this.then(
+        (val: T)  => Promise.resolve(fn()).then(() => val),
+        (err: unknown) => Promise.resolve(fn()).then(() => { throw err; })
+      );
+    };
+  }
+
   // IntersectionObserver — stub that never fires callbacks.
   // Sites use it for lazy-load, scroll-triggered animations, and sticky
   // headers. None of those affect initial DOM structure. A no-op constructor
