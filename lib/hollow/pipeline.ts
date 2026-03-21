@@ -15,6 +15,8 @@
  */
 
 import { v4 as uuidv4 } from 'uuid';
+import { join } from 'path';
+import { Worker, isMainThread } from 'worker_threads';
 import { fetchUrl, NetworkFetchError } from './network';
 import { tryMobileAPIBypass, tryCacheBypass, isReadOnlyUrl, shouldTryCacheFirst, isConsentWall } from './router';
 import { buildDOM } from './dom';
@@ -92,7 +94,45 @@ async function processCachedHtml(
   };
 }
 
+/**
+ * Public entry point.
+ *
+ * - On Vercel (process.env.VERCEL set): each lambda is an isolated process,
+ *   so there is no shared event loop to block — run inline.
+ * - In a worker thread (isMainThread === false): already off the main thread,
+ *   run inline to avoid infinite recursion.
+ * - Locally (main thread, no VERCEL): spawn a worker thread so Happy DOM's
+ *   synchronous JS execution doesn't block the HTTP event loop.
+ */
 export async function perceive(req: PerceiveRequest): Promise<HollowPerceiveResult> {
+  if (process.env.VERCEL || !isMainThread) {
+    return perceiveCore(req);
+  }
+  return perceiveInWorker(req);
+}
+
+async function perceiveInWorker(req: PerceiveRequest): Promise<HollowPerceiveResult> {
+  return new Promise((resolve, reject) => {
+    // process.cwd() is the project root — reliable across Next.js webpack transforms
+    const workerPath = join(process.cwd(), 'lib', 'hollow', 'pipeline-worker.ts');
+    const worker = new Worker(workerPath, {
+      workerData: req,
+      // tsx v4: --import tsx registers the TypeScript loader for the worker
+      execArgv: ['--import', 'tsx'],
+    });
+
+    worker.on('message', (msg: { ok: boolean; result?: HollowPerceiveResult; error?: string }) => {
+      if (msg.ok) resolve(msg.result!);
+      else reject(new Error(msg.error ?? 'Pipeline worker failed'));
+    });
+    worker.on('error', reject);
+    worker.on('exit', code => {
+      if (code !== 0) reject(new Error(`Pipeline worker exited with code ${code}`));
+    });
+  });
+}
+
+export async function perceiveCore(req: PerceiveRequest): Promise<HollowPerceiveResult> {
   // Strip optional sess: prefix — internal IDs are bare UUIDs; prefix is external-only
   const sessionId = req.sessionId ? req.sessionId.replace(/^sess:/, '') : uuidv4();
   const emit = getEmitter();

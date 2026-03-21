@@ -38,6 +38,14 @@ async function decompress(stored: string): Promise<string> {
 
 const SESSION_TTL = parseInt(process.env.SESSION_TTL_SECONDS ?? '3600', 10);
 
+// ─── Startup log — which store is active ─────────────────────────────────────
+
+if (hasRedis()) {
+  console.log('[hollow/session] Using Upstash Redis store');
+} else {
+  console.log('[hollow/session] WARNING: Redis not configured, using in-memory store — sessions will not persist across lambda instances');
+}
+
 // ─── In-memory fallback (local dev / CI) ─────────────────────────────────────
 
 // Stored on globalThis so all Next.js per-route webpack chunks share one Map.
