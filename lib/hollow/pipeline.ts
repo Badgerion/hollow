@@ -21,6 +21,7 @@ import { resolveStyles } from './css-resolver';
 import { calculateLayout, calculateSubtreeLayout } from './yoga-layout';
 import { resolveGridLayout } from './grid-resolver';
 import { generateGDGSpatial } from './gdg-spatial';
+import { findFiberRoots, traverseFiber, generateVDOMMap } from './vdom';
 import { scoreConfidence } from './confidence';
 import { loadSession, saveSession, newSession, bumpSession } from './session';
 import { getEmitter } from './sse-emitter';
@@ -79,12 +80,12 @@ export async function perceive(req: PerceiveRequest): Promise<HollowPerceiveResu
   });
 
   // ── Step 2: Happy DOM — parse HTML, execute JS ───────────────────────────────
-  const { window, document, vitality, jsExecutionTimedOut } = await step('2-happy-dom', () =>
+  const { window, document, vitality, jsExecutionTimedOut, reactDetected } = await step('2-happy-dom', () =>
     buildDOM(html, finalUrl)
   );
 
   const jsErrors = vitality.getErrors();
-  console.log(`[hollow/pipeline] 2-happy-dom: jsErrors=${jsErrors.length} timedOut=${jsExecutionTimedOut}`);
+  console.log(`[hollow/pipeline] 2-happy-dom: jsErrors=${jsErrors.length} timedOut=${jsExecutionTimedOut} reactDetected=${reactDetected}`);
 
   if (jsExecutionTimedOut) {
     emit.emit(sessionId, 'log_entry', {
@@ -110,6 +111,80 @@ export async function perceive(req: PerceiveRequest): Promise<HollowPerceiveResu
     throw new Error('Happy DOM produced no document.body — HTML may be invalid');
   }
   console.log(`[hollow/pipeline] 2-happy-dom: body children=${body.children.length}`);
+
+  // ── Step 2b: VDOM Hijack — React Fiber tree extraction ───────────────────────
+  // If React registered itself on the injected DevTools hook, walk the Fiber
+  // tree and emit a state-based GDG map. Skip the full yoga/grid pipeline.
+  if (reactDetected) {
+    const vdomResult = await step('2b-vdom-hijack', () => {
+      const roots = findFiberRoots(window);
+      console.log(`[hollow/pipeline] 2b-vdom-hijack: fiberRoots=${roots.length}`);
+      if (roots.length === 0) return null;
+      const allNodes = roots.flatMap(root => traverseFiber(root));
+      if (allNodes.length < 10) return null;
+      return generateVDOMMap(allNodes);
+    });
+
+    if (vdomResult) {
+      console.log(`[hollow/pipeline] 2b-vdom-hijack: nodes=${vdomResult.nodeCount} actionable=${vdomResult.actionableCount}`);
+
+      const confidence = 0.85;
+      const tier = 'vdom' as const;
+      const deductions: import('./types').ConfidenceDeduction[] = [];
+
+      const liveHtml = document.documentElement?.outerHTML ?? html;
+
+      const sessionState: SessionState = {
+        ...(existingSession
+          ? bumpSession(existingSession, liveHtml)
+          : newSession(sessionId, finalUrl, liveHtml)),
+        gdgMap: vdomResult.gdgMap,
+        confidence,
+        tier,
+        tokenEstimate: vdomResult.tokenEstimate,
+      };
+
+      await step('8-session-save', () => saveSession(sessionState));
+      window.happyDOM.close();
+
+      const ts = now();
+      emit.emit(sessionId, 'dom_delta', { html: liveHtml, url: finalUrl });
+      emit.emit(sessionId, 'gdg_map', {
+        map: vdomResult.gdgMap,
+        confidence,
+        tier,
+        actionableCount: vdomResult.actionableCount,
+        tokenEstimate: vdomResult.tokenEstimate,
+        timestamp: ts,
+      });
+      emit.emit(sessionId, 'confidence', { score: confidence, tier, deductions, timestamp: ts });
+      emit.emit(sessionId, 'log_entry', {
+        tag: 'VDOM',
+        message: `React Fiber tree extracted. ${vdomResult.nodeCount} nodes. ${vdomResult.actionableCount} actionable. Confidence: ${confidence}. Tier: vdom.`,
+        timestamp: ts,
+      });
+      emit.emit(sessionId, 'tier', { tier });
+
+      console.log(
+        `[hollow/pipeline] complete sessionId=sess:${sessionId} confidence=${confidence} tier=${tier} elements=${vdomResult.nodeCount} redisWrite=OK`
+      );
+
+      return {
+        sessionId: `sess:${sessionId}`,
+        gdgMap: vdomResult.gdgMap,
+        domDelta: liveHtml,
+        confidence,
+        confidenceDeductions: deductions,
+        jsErrors,
+        tier,
+        elementCount: vdomResult.nodeCount,
+        actionableCount: vdomResult.actionableCount,
+        tokenEstimate: vdomResult.tokenEstimate,
+      };
+    }
+
+    console.log('[hollow/pipeline] 2b-vdom-hijack: insufficient nodes — falling through to spatial pipeline');
+  }
 
   // ── Steps 3–4: CSS + Yoga Flexbox layout ────────────────────────────────────
   const { layoutMap, deductions: layoutDeductions } = await step('3-yoga-layout', () =>

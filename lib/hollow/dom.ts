@@ -14,6 +14,7 @@ export interface DOMResult {
   vitality: VitalityMonitor;
   html: string;
   jsExecutionTimedOut: boolean;
+  reactDetected: boolean;
 }
 
 const VIEWPORT_WIDTH = parseInt(process.env.HOLLOW_VIEWPORT_WIDTH ?? '1280', 10);
@@ -112,6 +113,29 @@ export async function buildDOM(html: string, url: string): Promise<DOMResult> {
     };
   }
 
+  // ── React DevTools hook ────────────────────────────────────────────────────
+  // Must be injected BEFORE document.write so React registers itself on the
+  // hook when its bundle initialises. React checks for this global at boot
+  // time and calls hook.inject(renderer) + hook.onCommitFiberRoot(id, root).
+  if (!win.__REACT_DEVTOOLS_GLOBAL_HOOK__) {
+    win.__REACT_DEVTOOLS_GLOBAL_HOOK__ = {
+      renderers:     new Map(),
+      supportsFiber: true,
+      fiberRoots:    [] as unknown[],
+      isDisabled:    false,
+      inject(renderer: unknown) {
+        const id = this.renderers.size;
+        this.renderers.set(id, renderer);
+        return id;
+      },
+      onCommitFiberRoot(_rendererID: number, root: unknown) {
+        (this.fiberRoots as unknown[]).push(root);
+      },
+      onCommitFiberUnmount()   {},
+      onPostCommitFiberRoot()  {},
+    };
+  }
+
   // Write the HTML into the document
   window.document.write(html);
   window.document.close();
@@ -139,12 +163,17 @@ export async function buildDOM(html: string, url: string): Promise<DOMResult> {
 
   const finalHtml = window.document.documentElement?.outerHTML ?? html;
 
+  // Detect whether React registered itself on the hook
+  const hook = win.__REACT_DEVTOOLS_GLOBAL_HOOK__;
+  const reactDetected = !!(hook?.renderers?.size > 0 || (Array.isArray(hook?.fiberRoots) && hook.fiberRoots.length > 0));
+
   return {
     window,
     document: window.document,
     vitality,
     html: finalHtml,
     jsExecutionTimedOut,
+    reactDetected,
   };
 }
 

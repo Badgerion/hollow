@@ -127,7 +127,7 @@ export interface SessionState {
   // Snapshot of the last perceive result — used by the polling fallback endpoint
   gdgMap?: string;
   confidence?: number;
-  tier?: 'hollow' | 'baas';
+  tier?: 'hollow' | 'baas' | 'vdom';
   tokenEstimate?: number;
 }
 
@@ -140,7 +140,7 @@ export interface HollowPerceiveResult {
   confidence: number;
   confidenceDeductions: ConfidenceDeduction[];
   jsErrors: JSError[];
-  tier: 'hollow' | 'baas';
+  tier: 'hollow' | 'baas' | 'vdom';
   elementCount: number;
   actionableCount: number;
   tokenEstimate: number;
