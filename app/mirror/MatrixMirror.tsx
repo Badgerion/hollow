@@ -209,6 +209,163 @@ function StatusDot({ status }: { status: ConnStatus }) {
   );
 }
 
+// ─── QR Connector ─────────────────────────────────────────────────────────────
+
+function QRConnector({ sessionId }: { sessionId: string }) {
+  const [open, setOpen] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+
+  const endpoint = typeof window !== 'undefined' ? window.location.origin : 'https://hollow-tan-omega.vercel.app';
+
+  const payload = JSON.stringify({
+    hollow_session: {
+      endpoint,
+      sessionId,
+      perceive: '/api/perceive',
+      act: '/api/act',
+      stream: `/api/stream/${sessionId}`,
+      instructions:
+        'POST to /api/perceive with {url, sessionId} to browse. ' +
+        'POST to /api/act with {sessionId, action} to interact. ' +
+        'GDG Spatial maps are returned — structured spatial trees for AI reasoning.',
+    },
+  });
+
+  const systemPrompt =
+    `You have access to a Hollow browser.\n` +
+    `Endpoint: ${endpoint}\n` +
+    `Session: ${sessionId}\n` +
+    `POST /api/perceive {url, sessionId} to load pages.\n` +
+    `POST /api/act {sessionId, action} to interact.\n` +
+    `Pages return as GDG Spatial maps — token-efficient\n` +
+    `structured trees. Element IDs like [1],[2] are\n` +
+    `actionable. Navigate, click, fill forms freely.`;
+
+  useEffect(() => {
+    if (!open || !canvasRef.current) return;
+    import('qrcode').then(QRCode => {
+      QRCode.toCanvas(canvasRef.current!, payload, {
+        width: 80,
+        margin: 1,
+        color: { dark: '#e2e2e2', light: '#0a0a0a' },
+      });
+    });
+  }, [open, payload]);
+
+  function copyPrompt() {
+    navigator.clipboard.writeText(systemPrompt).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    });
+  }
+
+  return (
+    <div style={{ position: 'relative', flexShrink: 0 }}>
+      {/* QR icon toggle button */}
+      <button
+        onClick={() => setOpen(o => !o)}
+        title="Share session — scan to connect any AI agent"
+        style={{
+          background: open ? '#042f2e' : 'transparent',
+          border: `1px solid ${open ? '#0d9488' : '#333'}`,
+          borderRadius: 3,
+          color: open ? '#5eead4' : '#444',
+          fontFamily: C.font,
+          fontSize: 13,
+          padding: '1px 6px',
+          cursor: 'pointer',
+          lineHeight: '20px',
+          userSelect: 'none' as const,
+        }}
+      >
+        ▦
+      </button>
+
+      {/* Collapsible panel */}
+      {open && (
+        <div style={{
+          position: 'absolute',
+          top: 'calc(100% + 8px)',
+          right: 0,
+          background: '#0f0f0f',
+          border: `1px solid ${C.border}`,
+          borderRadius: 6,
+          padding: 14,
+          zIndex: 200,
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 10,
+          width: 270,
+          boxShadow: '0 8px 32px rgba(0,0,0,0.7)',
+        }}>
+          {/* Header */}
+          <div style={{ fontSize: 9, color: '#555', letterSpacing: '0.12em', textTransform: 'uppercase' as const }}>
+            AI Agent Connector
+          </div>
+
+          {/* QR Code */}
+          <div style={{ display: 'flex', justifyContent: 'center', padding: '4px 0' }}>
+            <canvas
+              ref={canvasRef}
+              width={80}
+              height={80}
+              style={{ imageRendering: 'pixelated' as const, borderRadius: 3 }}
+            />
+          </div>
+
+          {/* Hint */}
+          <div style={{ fontSize: 9, color: '#333', textAlign: 'center' as const, lineHeight: 1.5 }}>
+            Scan to connect any AI agent to this session
+          </div>
+
+          {/* System prompt label */}
+          <div style={{ fontSize: 9, color: '#555', letterSpacing: '0.1em', textTransform: 'uppercase' as const }}>
+            One-liner system prompt
+          </div>
+
+          {/* Prompt text */}
+          <pre style={{
+            margin: 0,
+            background: '#0a0a0a',
+            border: `1px solid #1c1c1c`,
+            borderRadius: 3,
+            padding: '8px 10px',
+            fontSize: 9,
+            color: '#666',
+            lineHeight: 1.7,
+            whiteSpace: 'pre-wrap' as const,
+            wordBreak: 'break-word' as const,
+            fontFamily: C.font,
+          }}>
+            {systemPrompt}
+          </pre>
+
+          {/* Copy button */}
+          <button
+            onClick={copyPrompt}
+            style={{
+              background: copied ? '#052e16' : '#042f2e',
+              border: `1px solid ${copied ? '#4ade80' : '#0d9488'}`,
+              borderRadius: 3,
+              color: copied ? '#4ade80' : '#5eead4',
+              fontFamily: C.font,
+              fontSize: 10,
+              fontWeight: 700,
+              letterSpacing: '0.06em',
+              padding: '5px 8px',
+              cursor: 'pointer',
+              textTransform: 'uppercase' as const,
+            }}
+          >
+            {copied ? '✓ Copied' : 'Copy Prompt'}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function TierPill({ tier }: { tier: Tier | null }) {
   if (!tier) return null;
   const colors: Record<Tier, { bg: string; text: string; border: string }> = {
@@ -866,6 +1023,11 @@ export function MatrixMirror({ sessionId }: { sessionId: string | null }) {
 
         {/* Connection status */}
         <StatusDot status={status} />
+
+        <span style={{ color: C.border, fontSize: 18, lineHeight: 1 }}>|</span>
+
+        {/* QR session connector */}
+        <QRConnector sessionId={sessionId} />
       </div>
 
       {/* ── Main panels ───────────────────────────────────────────────────── */}
