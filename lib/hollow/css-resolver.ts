@@ -85,11 +85,32 @@ const DEFAULTS: ComputedStyles = {
   rowGap: 'normal',
 };
 
+/**
+ * Outer guard: catches anything that escapes the inner per-property try/catches.
+ * Happy DOM's parseCSSRules can throw from deep within getPropertyValue on
+ * partially-initialised or JS-timeout DOM states. Belt-and-suspenders: inner
+ * catches handle per-property failures; this catches everything else so the
+ * pipeline never crashes on a single bad element.
+ */
 export function resolveStyles(el: Element, win: Window): ComputedStyles {
+  try {
+    return resolveStylesInner(el, win);
+  } catch (err) {
+    console.warn(
+      '[hollow/css-resolver] resolveStyles escaped inner catches — returning defaults:',
+      err instanceof Error ? err.message : err
+    );
+    return { ...DEFAULTS };
+  }
+}
+
+function resolveStylesInner(el: Element, win: Window): ComputedStyles {
   let computed: CSSStyleDeclaration | null = null;
 
   try {
-    computed = win.getComputedStyle(el as unknown as Parameters<typeof win.getComputedStyle>[0]) as unknown as CSSStyleDeclaration;
+    computed = win.getComputedStyle(
+      el as unknown as Parameters<typeof win.getComputedStyle>[0]
+    ) as unknown as CSSStyleDeclaration;
   } catch {
     // Happy DOM may throw on certain element types; fall through to inline
   }
