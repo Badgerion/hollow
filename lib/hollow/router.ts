@@ -239,22 +239,21 @@ export async function tryCacheBypass(url: string, label = 'Cache bypass'): Promi
   try { hostname = new URL(url).hostname.replace(/^www\./, ''); } catch { /* ok */ }
 
   // Wayback Machine first — most reliable for paywalled content
-  console.log(`[hollow/router] ${label}: trying Wayback Machine for ${hostname}`);
-  const wayback = await tryWaybackCache(url);
+  const wayback = await tryWaybackCache(url, hostname, label);
   if (wayback) return wayback;
 
   // Bing cache fallback
-  console.log(`[hollow/router] ${label}: no Wayback snapshot, trying Bing cache`);
-  const bing = await tryBingCache(url);
+  const bing = await tryBingCache(url, hostname, label);
   if (bing) return bing;
 
-  console.log(`[hollow/router] ${label}: both failed, falling through to direct fetch`);
+  console.log(`[hollow/router] ${label}: cache miss on both Wayback and Bing for ${hostname} — falling through to direct fetch`);
   return null;
 }
 
-async function tryBingCache(url: string): Promise<CacheResult | null> {
+async function tryBingCache(url: string, hostname: string, label: string): Promise<CacheResult | null> {
   const cacheUrl =
     `https://cc.bingj.com/cache.aspx?q=${encodeURIComponent(url)}&url=${encodeURIComponent(url)}`;
+  console.log(`[hollow/router] ${label}: Bing cache check for ${hostname}`);
   try {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 8_000);
@@ -266,28 +265,35 @@ async function tryBingCache(url: string): Promise<CacheResult | null> {
     });
     clearTimeout(timer);
 
-    if (!res.ok) return null;
+    if (!res.ok) {
+      console.log(`[hollow/router] ${label}: Bing cache miss for ${hostname} (HTTP ${res.status})`);
+      return null;
+    }
     const html = await res.text();
 
     // Sanity check: must be substantial content, not an error page
     if (html.length < 1000 || /no cache|not found|page not found/i.test(html.slice(0, 300))) {
+      console.log(`[hollow/router] ${label}: Bing cache miss for ${hostname} (thin/error page)`);
       return null;
     }
 
-    console.log(`[hollow/router] Cache hit: Bing cache for ${new URL(url).hostname.replace(/^www\./, '')}`);
+    console.log(`[hollow/router] ${label}: Bing cache hit for ${hostname}`);
     return {
       html,
       cacheUrl,
       cacheDate: new Date().toISOString().slice(0, 10),
       source: 'bing',
     };
-  } catch {
+  } catch (err) {
+    console.log(`[hollow/router] ${label}: Bing cache miss for ${hostname} (${err instanceof Error ? err.message : err})`);
     return null;
   }
 }
 
-async function tryWaybackCache(url: string): Promise<CacheResult | null> {
+async function tryWaybackCache(url: string, hostname: string, label: string): Promise<CacheResult | null> {
+  console.log(`[hollow/router] ${label}: Wayback check for ${hostname}`);
   try {
+    // Step 1 — CDX availability check
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 8_000);
 
@@ -295,7 +301,10 @@ async function tryWaybackCache(url: string): Promise<CacheResult | null> {
     const res = await fetch(cdxUrl, { signal: controller.signal });
     clearTimeout(timer);
 
-    if (!res.ok) return null;
+    if (!res.ok) {
+      console.log(`[hollow/router] ${label}: Wayback CDX check failed for ${hostname} (HTTP ${res.status})`);
+      return null;
+    }
 
     const data = await res.json() as {
       archived_snapshots?: {
@@ -305,15 +314,17 @@ async function tryWaybackCache(url: string): Promise<CacheResult | null> {
 
     const closest = data.archived_snapshots?.closest;
     if (!closest?.available || !closest.url || !closest.timestamp) {
-      console.log(`[hollow/router] Cache miss: no Wayback snapshot for ${new URL(url).hostname.replace(/^www\./, '')}`);
+      console.log(`[hollow/router] ${label}: Wayback snapshot not found for ${hostname}`);
       return null;
     }
 
     const ts = closest.timestamp;
     const cacheDate = `${ts.slice(0, 4)}-${ts.slice(4, 6)}-${ts.slice(6, 8)}`;
 
-    // Use if_ modifier to prevent Wayback from injecting its toolbar into the HTML
-    const archiveUrl = closest.url.replace('/web/', '/web/if_/');
+    // Step 2 — fetch the snapshot. Use 'manual' redirect mode so we can guard
+    // against Wayback redirecting to archive.org internal pages (terms.php etc).
+    const archiveUrl = closest.url; // raw snapshot URL from CDX, no if_ modifier
+    console.log(`[hollow/router] ${label}: Wayback snapshot found for ${hostname} (${cacheDate}), fetching…`);
 
     const controller2 = new AbortController();
     const timer2 = setTimeout(() => controller2.abort(), 10_000);
@@ -321,17 +332,39 @@ async function tryWaybackCache(url: string): Promise<CacheResult | null> {
     const archiveRes = await fetch(archiveUrl, {
       headers: { 'User-Agent': 'Mozilla/5.0 (compatible; HollowBot/1.0)' },
       signal: controller2.signal,
-      redirect: 'follow',
+      redirect: 'manual', // do NOT follow — guard against redirect to terms/about pages
     });
     clearTimeout(timer2);
 
-    if (!archiveRes.ok) return null;
-    const html = await archiveRes.text();
+    // Step 3 — redirect guard: if Wayback bounced us somewhere else, treat as miss
+    if (archiveRes.status >= 300 && archiveRes.status < 400) {
+      const location = archiveRes.headers.get('location') ?? '';
+      if (!location.includes('web.archive.org/web/')) {
+        console.log(`[hollow/router] ${label}: Wayback redirected to non-archive URL for ${hostname} (${location.slice(0, 80)}) — treating as miss`);
+        return null;
+      }
+      // Rare: redirect within the archive itself — fall through as miss to keep it simple
+      console.log(`[hollow/router] ${label}: Wayback redirect within archive for ${hostname} — treating as miss`);
+      return null;
+    }
 
-    console.log(`[hollow/router] Cache hit: Wayback snapshot ${cacheDate} for ${new URL(url).hostname.replace(/^www\./, '')}`);
+    if (!archiveRes.ok) {
+      console.log(`[hollow/router] ${label}: Wayback fetch failed for ${hostname} (HTTP ${archiveRes.status})`);
+      return null;
+    }
+
+    let html = await archiveRes.text();
+
+    // Step 4 — strip Wayback toolbar injection to prevent its JS from polluting logs
+    html = html.replace(
+      /<!-- BEGIN WAYBACK TOOLBAR INSERT -->[\s\S]*?<!-- END WAYBACK TOOLBAR INSERT -->/g,
+      ''
+    );
+
+    console.log(`[hollow/router] ${label}: Wayback cache hit for ${hostname} (snapshot ${cacheDate})`);
     return { html, cacheUrl: archiveUrl, cacheDate, source: 'wayback' };
-  } catch {
-    console.log('[hollow/router] Cache miss: Wayback fetch failed');
+  } catch (err) {
+    console.log(`[hollow/router] ${label}: Wayback fetch failed for ${hostname} (${err instanceof Error ? err.message : err})`);
     return null;
   }
 }
