@@ -5,7 +5,7 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 type LogTag = 'SYS' | 'GDG' | 'AI' | 'ACT' | 'OK' | 'WARN' | 'ERR';
-type Tier = 'hollow' | 'partial' | 'vdom';
+type Tier = 'hollow' | 'partial' | 'vdom' | 'mobile-api' | 'cache';
 type ConnStatus = 'disconnected' | 'connecting' | 'connected' | 'polling' | 'error';
 
 interface LogEntry {
@@ -184,9 +184,11 @@ function StatusDot({ status }: { status: ConnStatus }) {
 function TierPill({ tier }: { tier: Tier | null }) {
   if (!tier) return null;
   const colors: Record<Tier, { bg: string; text: string; border: string }> = {
-    hollow: { bg: '#052e16', text: '#4ade80', border: '#166534' },
-    partial: { bg: '#431407', text: '#fb923c', border: '#92400e' },
-    vdom:   { bg: '#1e1b4b', text: '#a78bfa', border: '#4338ca' },
+    hollow:       { bg: '#052e16', text: '#4ade80', border: '#166534' },
+    partial:      { bg: '#431407', text: '#fb923c', border: '#92400e' },
+    vdom:         { bg: '#1e1b4b', text: '#a78bfa', border: '#4338ca' },
+    'mobile-api': { bg: '#172554', text: '#60a5fa', border: '#1d4ed8' },
+    cache:        { bg: '#422006', text: '#fbbf24', border: '#92400e' },
   };
   const c = colors[tier] ?? colors.partial;
   return (
@@ -201,7 +203,7 @@ function TierPill({ tier }: { tier: Tier | null }) {
       color: c.text,
       border: `1px solid ${c.border}`,
     }}>
-      {tier}
+      {tier === 'mobile-api' ? 'MOBILE' : tier === 'cache' ? 'CACHE' : tier}
     </span>
   );
 }
@@ -830,14 +832,14 @@ export function MatrixMirror({ sessionId }: { sessionId: string | null }) {
             flexShrink: 0,
           }}>
             <span style={{ fontSize: 10, color: '#444', letterSpacing: '0.1em', textTransform: 'uppercase' }}>
-              {tier === 'vdom' ? 'Component Tree' : 'Ghost DOM'}
+              {tier === 'vdom' ? 'Component Tree' : tier === 'mobile-api' ? 'API Map' : 'Ghost DOM'}
             </span>
-            {(tier === 'vdom' ? gdgMap : domHtml) && (
-              <span style={{ marginLeft: 'auto', fontSize: 10, color: tier === 'vdom' ? '#a78bfa' : C.teal }}>● LIVE</span>
+            {(tier === 'vdom' || tier === 'mobile-api' ? gdgMap : domHtml) && (
+              <span style={{ marginLeft: 'auto', fontSize: 10, color: tier === 'vdom' ? '#a78bfa' : tier === 'mobile-api' ? '#60a5fa' : C.teal }}>● LIVE</span>
             )}
           </div>
 
-          {tier === 'vdom' ? (
+          {tier === 'vdom' || tier === 'mobile-api' ? (
             gdgMap ? (
               <pre style={{
                 flex: 1,
@@ -845,7 +847,7 @@ export function MatrixMirror({ sessionId }: { sessionId: string | null }) {
                 padding: '12px 14px',
                 overflowY: 'auto',
                 background: C.bg,
-                color: '#c4b5fd',
+                color: tier === 'mobile-api' ? '#93c5fd' : '#c4b5fd',
                 fontSize: 11,
                 lineHeight: 1.6,
                 fontFamily: C.font,

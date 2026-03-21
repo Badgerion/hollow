@@ -16,6 +16,7 @@
 
 import { v4 as uuidv4 } from 'uuid';
 import { fetchUrl, NetworkFetchError } from './network';
+import { tryMobileAPIBypass, tryCacheBypass, isReadOnlyUrl } from './router';
 import { buildDOM } from './dom';
 import { resolveStyles } from './css-resolver';
 import { calculateLayout, calculateSubtreeLayout } from './yoga-layout';
@@ -67,6 +68,52 @@ export async function perceive(req: PerceiveRequest): Promise<HollowPerceiveResu
     console.log(`[hollow/pipeline] 1-load-session: using provided html length=${html.length}`);
   } else {
     if (!req.url) throw new Error('`url` is required when `html` is not provided');
+
+    // ── Step 1b: Mobile API Bypass (before HTML fetch) ──────────────────────────
+    const mobileResult = await step('1b-mobile-api', () => tryMobileAPIBypass(req.url!));
+    if (mobileResult) {
+      const ts = now();
+      const sessionState: SessionState = {
+        ...newSession(sessionId, req.url!, ''),
+        gdgMap: mobileResult.gdgMap,
+        confidence: 1.0,
+        tier: 'mobile-api',
+        tokenEstimate: mobileResult.tokenEstimate,
+      };
+      await step('8-session-save', () => saveSession(sessionState));
+
+      emit.emit(sessionId, 'dom_delta', { html: '', url: req.url! });
+      emit.emit(sessionId, 'gdg_map', {
+        map: mobileResult.gdgMap,
+        confidence: 1.0,
+        tier: 'mobile-api',
+        actionableCount: 0,
+        tokenEstimate: mobileResult.tokenEstimate,
+        timestamp: ts,
+      });
+      emit.emit(sessionId, 'confidence', { score: 1.0, tier: 'mobile-api', deductions: [], timestamp: ts });
+      emit.emit(sessionId, 'log_entry', {
+        tag: 'GDG',
+        message: `Mobile API bypass: ${mobileResult.domain}. Tier: mobile-api.`,
+        timestamp: ts,
+      });
+      emit.emit(sessionId, 'tier', { tier: 'mobile-api' });
+
+      console.log(`[hollow/pipeline] complete sessionId=sess:${sessionId} tier=mobile-api domain=${mobileResult.domain}`);
+      return {
+        sessionId: `sess:${sessionId}`,
+        gdgMap: mobileResult.gdgMap,
+        domDelta: '',
+        confidence: 1.0,
+        confidenceDeductions: [],
+        jsErrors: [],
+        tier: 'mobile-api',
+        elementCount: 0,
+        actionableCount: 0,
+        tokenEstimate: mobileResult.tokenEstimate,
+      };
+    }
+
     emit.emitLog(sessionId, 'SYS', `Fetching ${req.url}`);
     try {
       const fetched = await step('1-fetch-url', () => fetchUrl(req.url!));
@@ -281,6 +328,84 @@ export async function perceive(req: PerceiveRequest): Promise<HollowPerceiveResu
   );
   const confidence = Math.round(score * 100) / 100;
   console.log(`[hollow/pipeline] 7-confidence: score=${confidence} tier=${tier}`);
+
+  // ── Step 7b: Cache Bypass ─────────────────────────────────────────────────────
+  // Runs when the direct pipeline produced low confidence on a read-only URL.
+  // Re-runs the DOM+layout+GDG steps on cached HTML so the agent gets usable content.
+  if (confidence < 0.5 && !req.html && isReadOnlyUrl(finalUrl)) {
+    const cacheResult = await step('7b-cache-bypass', () => tryCacheBypass(finalUrl));
+    if (cacheResult) {
+      window.happyDOM.close(); // close the low-confidence window
+
+      const { window: cWin, document: cDoc, vitality: cVit, jsExecutionTimedOut: cTimed } =
+        await step('7b-cache-dom', () => buildDOM(cacheResult.html, finalUrl));
+
+      if (cTimed) {
+        console.log('[hollow/pipeline] 7b-cache-dom: JS execution timed out on cached HTML');
+      }
+
+      const { layoutMap: cLayoutMap, deductions: cDeductions } =
+        await step('7b-cache-yoga', () =>
+          calculateLayout(cDoc.body as unknown as Element, cWin)
+        );
+
+      const cGdg = generateGDGSpatial(
+        cDoc.body as unknown as Element, cWin, cLayoutMap,
+        new Map(), new Map(), new Map()
+      );
+
+      const source = cacheResult.source === 'bing' ? 'Bing Cache' : 'Wayback Machine';
+      const cacheHeader = `[CACHE: ${source} snapshot from ${cacheResult.cacheDate}]\n[Note: content may be out of date]\n\n`;
+      const cGdgMap = cacheHeader + cGdg.map;
+      const cConfidence = 0.70;
+      const cTier = 'cache' as const;
+
+      cWin.happyDOM.close();
+
+      const cSessionState: SessionState = {
+        ...(existingSession
+          ? bumpSession(existingSession, cacheResult.html)
+          : newSession(sessionId, finalUrl, cacheResult.html)),
+        gdgMap: cGdgMap,
+        confidence: cConfidence,
+        tier: cTier,
+        tokenEstimate: cGdg.tokenEstimate,
+      };
+      await step('8-session-save', () => saveSession(cSessionState));
+
+      const cTs = now();
+      emit.emit(sessionId, 'dom_delta', { html: cacheResult.html, url: finalUrl });
+      emit.emit(sessionId, 'gdg_map', {
+        map: cGdgMap,
+        confidence: cConfidence,
+        tier: cTier,
+        actionableCount: cGdg.actionableCount,
+        tokenEstimate: cGdg.tokenEstimate,
+        timestamp: cTs,
+      });
+      emit.emit(sessionId, 'confidence', { score: cConfidence, tier: cTier, deductions: cDeductions, timestamp: cTs });
+      emit.emit(sessionId, 'log_entry', {
+        tag: 'GDG',
+        message: `Cache bypass: ${source} snapshot from ${cacheResult.cacheDate}. ${cGdg.tokenEstimate} tokens. Confidence: ${cConfidence}.`,
+        timestamp: cTs,
+      });
+      emit.emit(sessionId, 'tier', { tier: cTier });
+
+      console.log(`[hollow/pipeline] complete sessionId=sess:${sessionId} tier=cache source=${cacheResult.source}`);
+      return {
+        sessionId: `sess:${sessionId}`,
+        gdgMap: cGdgMap,
+        domDelta: cacheResult.html,
+        confidence: cConfidence,
+        confidenceDeductions: cDeductions,
+        jsErrors: cVit.getErrors(),
+        tier: cTier,
+        elementCount: cLayoutMap.size,
+        actionableCount: cGdg.actionableCount,
+        tokenEstimate: cGdg.tokenEstimate,
+      };
+    }
+  }
 
   // ── Step 8: Session persistence ───────────────────────────────────────────────
   const liveHtml = document.documentElement?.outerHTML ?? html;
