@@ -225,7 +225,13 @@ function buildYogaTree(
 ): boolean {
   if (!isLayoutElement(el)) return false;
 
-  const styles = resolveStyles(el, win);
+  let styles: ComputedStyles;
+  try {
+    styles = resolveStyles(el, win);
+  } catch (err) {
+    console.warn(`[hollow/yoga] resolveStyles threw for <${el.tagName.toLowerCase()}> — skipping element:`, err instanceof Error ? err.message : err);
+    return false;
+  }
 
   if (styles.visibility === 'hidden' || styles.display === 'none') return false;
 
@@ -384,7 +390,12 @@ export async function calculateLayout(body: Element, win: Window): Promise<YogaR
   // getComputedStyle is returning real values or empty strings in serverless.
   const firstChild = Array.from(body.children)[0];
   if (firstChild) {
-    const rawStyles = resolveStyles(firstChild, win);
+    let rawStyles: ComputedStyles;
+    try {
+      rawStyles = resolveStyles(firstChild, win);
+    } catch {
+      rawStyles = { display: 'block', visibility: 'visible', opacity: '1', width: 'auto', height: 'auto', minWidth: '0', maxWidth: 'none', minHeight: '0', maxHeight: 'none', marginTop: 0, marginRight: 0, marginBottom: 0, marginLeft: 0, paddingTop: 0, paddingRight: 0, paddingBottom: 0, paddingLeft: 0, borderTopWidth: 0, borderRightWidth: 0, borderBottomWidth: 0, borderLeftWidth: 0, boxSizing: 'content-box', position: 'static', top: 'auto', left: 'auto', right: 'auto', bottom: 'auto', transform: 'none', overflow: 'visible', flexDirection: 'row', justifyContent: 'flex-start', alignItems: 'stretch', alignContent: 'stretch', flexWrap: 'nowrap', flexGrow: 0, flexShrink: 1, flexBasis: 'auto', order: 0, gridTemplateColumns: 'none', gridTemplateRows: 'none', gridAutoColumns: 'auto', gridAutoRows: 'auto', gridColumn: 'auto', gridRow: 'auto', gap: 'normal', columnGap: 'normal', rowGap: 'normal' };
+    }
     console.log(
       `[hollow/yoga] first child <${firstChild.tagName.toLowerCase()}> raw styles:` +
       ` display=${rawStyles.display}` +
