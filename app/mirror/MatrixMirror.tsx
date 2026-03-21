@@ -5,7 +5,7 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 type LogTag = 'SYS' | 'GDG' | 'AI' | 'ACT' | 'OK' | 'WARN' | 'ERR';
-type Tier = 'hollow' | 'baas';
+type Tier = 'hollow' | 'baas' | 'vdom';
 type ConnStatus = 'disconnected' | 'connecting' | 'connected' | 'polling' | 'error';
 
 interface LogEntry {
@@ -169,7 +169,12 @@ function StatusDot({ status }: { status: ConnStatus }) {
 
 function TierPill({ tier }: { tier: Tier | null }) {
   if (!tier) return null;
-  const hollow = tier === 'hollow';
+  const colors: Record<Tier, { bg: string; text: string; border: string }> = {
+    hollow: { bg: '#052e16', text: '#4ade80', border: '#166534' },
+    baas:   { bg: '#431407', text: '#fb923c', border: '#92400e' },
+    vdom:   { bg: '#1e1b4b', text: '#a78bfa', border: '#4338ca' },
+  };
+  const c = colors[tier] ?? colors.baas;
   return (
     <span style={{
       padding: '2px 8px',
@@ -178,9 +183,9 @@ function TierPill({ tier }: { tier: Tier | null }) {
       fontWeight: 700,
       letterSpacing: '0.1em',
       textTransform: 'uppercase' as const,
-      background: hollow ? '#052e16' : '#431407',
-      color: hollow ? '#4ade80' : '#fb923c',
-      border: `1px solid ${hollow ? '#166534' : '#92400e'}`,
+      background: c.bg,
+      color: c.text,
+      border: `1px solid ${c.border}`,
     }}>
       {tier}
     </span>
@@ -434,6 +439,7 @@ export function MatrixMirror({ sessionId }: { sessionId: string | null }) {
   const [log, setLog] = useState<LogEntry[]>([]);
   const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set());
   const [domHtml, setDomHtml] = useState<string | null>(null);
+  const [gdgMap, setGdgMap] = useState<string | null>(null);
   const [activeId, setActiveId] = useState<number | null>(null);
   const [intervention, setIntervention] = useState('');
   const [staged, setStaged] = useState<string | null>(null);
@@ -520,6 +526,7 @@ export function MatrixMirror({ sessionId }: { sessionId: string | null }) {
           if (d.url)  setCurrentUrl(d.url);
           if (d.confidence !== null && d.confidence !== undefined) setConfidence(d.confidence);
           if (d.tier) setTier(d.tier as Tier);
+          if (d.gdgMap) setGdgMap(d.gdgMap as string);
           if (d.gdgMap) {
             addEntry({
               tag: 'GDG',
@@ -567,6 +574,7 @@ export function MatrixMirror({ sessionId }: { sessionId: string | null }) {
       const data = JSON.parse(e.data);
       if (data.confidence !== undefined) setConfidence(data.confidence);
       if (data.tier) setTier(data.tier as Tier);
+      if (data.map) setGdgMap(data.map as string);
       addEntry({
         tag: 'GDG',
         message: `Perception map generated. ${data.tokenEstimate ?? '?'} tokens. Confidence: ${data.confidence?.toFixed(2) ?? '?'}. Tier: ${data.tier ?? '?'}.`,
@@ -790,7 +798,7 @@ export function MatrixMirror({ sessionId }: { sessionId: string | null }) {
       {/* ── Main panels ───────────────────────────────────────────────────── */}
       <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
 
-        {/* Left — Ghost DOM viewer */}
+        {/* Left — Ghost DOM / Component Tree viewer */}
         <div style={{
           width: '45%',
           borderRight: `1px solid ${C.border}`,
@@ -808,14 +816,44 @@ export function MatrixMirror({ sessionId }: { sessionId: string | null }) {
             flexShrink: 0,
           }}>
             <span style={{ fontSize: 10, color: '#444', letterSpacing: '0.1em', textTransform: 'uppercase' }}>
-              Ghost DOM
+              {tier === 'vdom' ? 'Component Tree' : 'Ghost DOM'}
             </span>
-            {domHtml && (
-              <span style={{ marginLeft: 'auto', fontSize: 10, color: C.teal }}>● LIVE</span>
+            {(tier === 'vdom' ? gdgMap : domHtml) && (
+              <span style={{ marginLeft: 'auto', fontSize: 10, color: tier === 'vdom' ? '#a78bfa' : C.teal }}>● LIVE</span>
             )}
           </div>
 
-          {domHtml ? (
+          {tier === 'vdom' ? (
+            gdgMap ? (
+              <pre style={{
+                flex: 1,
+                margin: 0,
+                padding: '12px 14px',
+                overflowY: 'auto',
+                background: C.bg,
+                color: '#c4b5fd',
+                fontSize: 11,
+                lineHeight: 1.6,
+                fontFamily: C.font,
+                whiteSpace: 'pre',
+              }}>
+                {gdgMap}
+              </pre>
+            ) : (
+              <div style={{
+                flex: 1,
+                display: 'flex',
+                flexDirection: 'column',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: 10,
+                color: '#2a2a2a',
+              }}>
+                <span style={{ fontSize: 28 }}>◻</span>
+                <span style={{ fontSize: 11 }}>Waiting for component tree…</span>
+              </div>
+            )
+          ) : domHtml ? (
             <iframe
               ref={iframeRef}
               srcDoc={injectHollowScript(domHtml)}

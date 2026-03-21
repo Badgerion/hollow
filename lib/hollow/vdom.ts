@@ -247,6 +247,64 @@ export function findFiberRoots(win: any): Fiber[] {
   return roots;
 }
 
+// ─── Find fiber stateNode by action ID ───────────────────────────────────────
+
+/**
+ * Walk the Fiber tree (same DFS order as traverseFiber) and return the
+ * stateNode of the actionable element assigned the given ID.
+ * stateNode for a HostComponent is the actual Happy DOM element.
+ */
+export function findFiberById(roots: Fiber[], targetId: number): Fiber | null {
+  let counter = 0;
+  const stack: Fiber[] = [];
+
+  for (const root of roots) {
+    let child = root.child;
+    while (child) {
+      stack.push(child);
+      child = child.sibling;
+    }
+  }
+
+  while (stack.length > 0) {
+    const fiber = stack.pop()!;
+    const { tag } = fiber;
+
+    if (SKIP_TAGS.has(tag) && tag !== TAG_HOST_ROOT) {
+      let c = fiber.child;
+      while (c) { stack.push(c); c = c.sibling; }
+      continue;
+    }
+
+    if (tag === TAG_HOST_TEXT) {
+      const text = String(fiber.pendingProps ?? '').trim();
+      if (!text) continue;
+    }
+
+    if (isActionableHost(fiber)) {
+      counter++;
+      if (counter === targetId) return fiber;
+    }
+
+    if (tag !== TAG_HOST_TEXT) {
+      const childFibers: Fiber[] = [];
+      // Skip inlined single HostText child
+      let c = fiber.child;
+      while (c) {
+        if (!(tag === TAG_HOST_COMPONENT && c.tag === TAG_HOST_TEXT && !c.sibling)) {
+          childFibers.push(c);
+        }
+        c = c.sibling;
+      }
+      for (let i = childFibers.length - 1; i >= 0; i--) {
+        stack.push(childFibers[i]);
+      }
+    }
+  }
+
+  return null;
+}
+
 // ─── Count nodes ─────────────────────────────────────────────────────────────
 
 function countNodes(nodes: VDOMNode[]): { total: number; actionable: number } {

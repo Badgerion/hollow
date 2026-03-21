@@ -13,6 +13,7 @@ import { loadSession } from '@/lib/hollow/session';
 import { buildDOM } from '@/lib/hollow/dom';
 import { perceive } from '@/lib/hollow/pipeline';
 import { getEmitter } from '@/lib/hollow/sse-emitter';
+import { findFiberRoots, findFiberById } from '@/lib/hollow/vdom';
 import type { ActRequest } from '@/lib/hollow/types';
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
@@ -61,20 +62,25 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     }
 
     if (action.elementId !== undefined) {
-      // We need to find the element by its GDG Spatial ID.
-      // For now, we inject a data attribute mapping during perceive (Phase 1 limitation:
-      // we use DOM query by position as a bridge). In Phase 2, element IDs will be
-      // embedded as data-hollow-id attributes in the serialized HTML.
-      //
-      // Interim approach: re-generate the perception map to resolve element IDs,
-      // then apply the action.
+      let target: HTMLElement | undefined;
 
-      const allInteractive = Array.from(
-        document.querySelectorAll('a, button, input, select, textarea, [role], [onclick], [tabindex]')
-      );
-
-      // The element ID is 1-indexed in the order actionable elements were encountered
-      const target = allInteractive[action.elementId - 1] as unknown as HTMLElement | undefined;
+      if (session.tier === 'vdom') {
+        // VDOM session: resolve element ID via the Fiber tree.
+        // React re-registers on the hook during buildDOM, so findFiberRoots
+        // returns the committed Fiber tree. The stateNode of a HostComponent
+        // (tag=5) is the actual Happy DOM element.
+        const roots = findFiberRoots(window as unknown as Record<string, unknown>);
+        const fiber = roots.length > 0 ? findFiberById(roots, action.elementId) : null;
+        if (fiber?.stateNode) {
+          target = fiber.stateNode as HTMLElement;
+        }
+      } else {
+        // Spatial session: resolve by position in interactive element list.
+        const allInteractive = Array.from(
+          document.querySelectorAll('a, button, input, select, textarea, [role], [onclick], [tabindex]')
+        );
+        target = allInteractive[action.elementId - 1] as unknown as HTMLElement | undefined;
+      }
 
       if (!target) {
         window.happyDOM.close();
