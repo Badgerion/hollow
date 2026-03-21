@@ -25,6 +25,12 @@ export interface ScoreResult {
   tier: 'hollow' | 'baas';
 }
 
+// Max total deduction from absolute/fixed positioning signals.
+// Real-world SPAs commonly have hundreds of overlays, dropdowns, and sticky
+// elements. Each one is a genuine uncertainty signal, but penalising all of
+// them floors the score for any Tailwind site to 0. Cap at 6 elements worth.
+const ABSOLUTE_FIXED_CAP = 0.30; // 6 × 0.05
+
 /**
  * Merge deductions from layout pass + JS errors + any additional signals.
  * Returns a normalised score and the tier to use.
@@ -33,7 +39,27 @@ export function scoreConfidence(
   layoutDeductions: ConfidenceDeduction[],
   jsErrors: JSError[]
 ): ScoreResult {
-  const deductions: ConfidenceDeduction[] = [...layoutDeductions];
+  // Split absolute/fixed deductions from everything else so we can cap them.
+  const absoluteFixed = layoutDeductions.filter(
+    d => /^(absolute|fixed) element/.test(d.reason)
+  );
+  const other = layoutDeductions.filter(
+    d => !/^(absolute|fixed) element/.test(d.reason)
+  );
+
+  const absoluteFixedTotal = Math.min(
+    absoluteFixed.reduce((s, d) => s + d.amount, 0),
+    ABSOLUTE_FIXED_CAP
+  );
+
+  const deductions: ConfidenceDeduction[] = [...other];
+
+  if (absoluteFixedTotal > 0) {
+    deductions.push({
+      reason: `absolute/fixed elements (${absoluteFixed.length}, capped at ${ABSOLUTE_FIXED_CAP})`,
+      amount: absoluteFixedTotal,
+    });
+  }
 
   // Each JS error is a -0.10 deduction
   for (const error of jsErrors) {
