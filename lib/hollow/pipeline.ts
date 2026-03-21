@@ -76,15 +76,15 @@ export async function perceive(req: PerceiveRequest): Promise<HollowPerceiveResu
       if (fetchErr instanceof NetworkFetchError) {
         const isWAF = fetchErr.code === 'waf_block';
         const payload = isWAF
-          ? { error: 'waf_block', message: 'WAF blocked the request', tier: 'baas' as const, route: 'pwa_relay_candidate' }
-          : { error: 'fetch_failed', status: fetchErr.statusCode, message: `Site returned HTTP ${fetchErr.statusCode}`, tier: 'baas' as const };
+          ? { error: 'waf_block', message: 'WAF blocked the request', tier: 'partial' as const, route: 'pwa_relay_candidate' }
+          : { error: 'fetch_failed', status: fetchErr.statusCode, message: `Site returned HTTP ${fetchErr.statusCode}`, tier: 'partial' as const };
 
         emit.emit(sessionId, 'log_entry', {
           tag: 'ERR',
           message: payload.message,
           timestamp: now(),
         });
-        emit.emit(sessionId, 'tier', { tier: 'baas' });
+        emit.emit(sessionId, 'tier', { tier: 'partial' });
 
         // Attach structured payload so the API route can return it as JSON
         const wrapped = new Error(payload.message) as Error & { hollowNetworkPayload: typeof payload };
@@ -328,10 +328,10 @@ export async function perceive(req: PerceiveRequest): Promise<HollowPerceiveResu
     }
   }
 
-  if (tier === 'baas') {
+  if (tier === 'partial') {
     emit.emit(sessionId, 'log_entry', {
       tag: 'WARN',
-      message: `Confidence ${confidence} below threshold. Routing to BaaS fallback.`,
+      message: `Confidence ${confidence} below threshold. Returning partial map — consider VDOM Hijack or Router upgrade.`,
       timestamp: ts,
     });
   }

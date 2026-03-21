@@ -2,7 +2,7 @@
  * Confidence scorer — computes a 0.0–1.0 score indicating how much Hollow
  * trusts its own layout output for this page.
  *
- * Below 0.8: route to BaaS (Browserbase) fallback.
+ * Below 0.8: return a partial map (no external browser vendor).
  */
 
 import type { ConfidenceDeduction, JSError } from './types';
@@ -22,7 +22,7 @@ const DEDUCTION = {
 export interface ScoreResult {
   score: number;
   deductions: ConfidenceDeduction[];
-  tier: 'hollow' | 'baas';
+  tier: 'hollow' | 'partial';
 }
 
 // Max total deduction from absolute/fixed positioning signals.
@@ -71,7 +71,7 @@ export function scoreConfidence(
 
   const total = deductions.reduce((sum, d) => sum + d.amount, 0);
   const score = Math.max(FLOOR, 1.0 - total);
-  const tier = score >= BAAS_THRESHOLD ? 'hollow' : 'baas';
+  const tier = score >= BAAS_THRESHOLD ? 'hollow' : 'partial';
 
   return { score, deductions, tier };
 }

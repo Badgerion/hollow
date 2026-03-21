@@ -5,7 +5,7 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 type LogTag = 'SYS' | 'GDG' | 'AI' | 'ACT' | 'OK' | 'WARN' | 'ERR';
-type Tier = 'hollow' | 'baas' | 'vdom';
+type Tier = 'hollow' | 'partial' | 'vdom';
 type ConnStatus = 'disconnected' | 'connecting' | 'connected' | 'polling' | 'error';
 
 interface LogEntry {
@@ -185,10 +185,10 @@ function TierPill({ tier }: { tier: Tier | null }) {
   if (!tier) return null;
   const colors: Record<Tier, { bg: string; text: string; border: string }> = {
     hollow: { bg: '#052e16', text: '#4ade80', border: '#166534' },
-    baas:   { bg: '#431407', text: '#fb923c', border: '#92400e' },
+    partial: { bg: '#431407', text: '#fb923c', border: '#92400e' },
     vdom:   { bg: '#1e1b4b', text: '#a78bfa', border: '#4338ca' },
   };
-  const c = colors[tier] ?? colors.baas;
+  const c = colors[tier] ?? colors.partial;
   return (
     <span style={{
       padding: '2px 8px',
