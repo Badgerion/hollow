@@ -44,6 +44,11 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
     return NextResponse.json(result, { status: 200 });
   } catch (err) {
+    // Structured network errors (WAF block, HTTP error) — return as clean JSON
+    const networkPayload = (err as { hollowNetworkPayload?: unknown }).hollowNetworkPayload;
+    if (networkPayload) {
+      return NextResponse.json(networkPayload, { status: 200 });
+    }
     const message = err instanceof Error ? err.message : 'Internal pipeline error';
     console.error('[hollow/perceive]', err);
     return NextResponse.json({ error: message }, { status: 500 });
