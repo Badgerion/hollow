@@ -105,7 +105,7 @@ function injectHollowScript(html: string, sessionUrl?: string): string {
       el.style.zIndex=el.style.zIndex||'1';
       el.appendChild(b);
     });
-    // Mirror clicks to parent MatrixMirror — let default behavior also proceed
+    // Intercept handled clicks — prevent iframe navigation, route through Hollow
     document.addEventListener('click',function(e){
       var el=e.target.closest('a,button,[role="button"]');
       if(!el)return;
@@ -113,6 +113,9 @@ function injectHollowScript(html: string, sessionUrl?: string): string {
         ?parseInt(el.dataset.hollowId)
         :null;
       var href=el.getAttribute('href')||null;
+      // Only intercept if we can handle it — prevents "refused to connect"
+      if(!hollowId&&!href)return;
+      e.preventDefault();
       window.parent.postMessage({
         type:'hollow-click',
         hollowId:hollowId,
@@ -326,7 +329,12 @@ function StartScreen() {
   const [error, setError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
-  useEffect(() => { inputRef.current?.focus(); }, []);
+  useEffect(() => {
+    inputRef.current?.focus();
+    // Auto-start with Startpage as the default session
+    setInput('https://www.startpage.com/');
+    handleStart('https://www.startpage.com/');
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Once pipeline completes (ready != null), wait 1.5 s before redirecting.
   // This lets Redis writes propagate before the Mirror starts polling.
@@ -338,8 +346,8 @@ function StartScreen() {
     return () => clearTimeout(t);
   }, [ready]);
 
-  async function handleStart() {
-    const value = input.trim();
+  async function handleStart(override?: string) {
+    const value = (override ?? input).trim();
     if (!value || loading || ready) return;
     setLoading(true);
     setError(null);
@@ -409,7 +417,7 @@ function StartScreen() {
           }}
         />
         <button
-          onClick={handleStart}
+          onClick={() => handleStart()}
           disabled={!canSubmit}
           style={{
             padding: '10px 20px',
@@ -489,6 +497,9 @@ export function MatrixMirror({ sessionId }: { sessionId: string | null }) {
   const [navInput, setNavInput] = useState('');
   const [navLoading, setNavLoading] = useState(false);
   const [navError, setNavError] = useState<string | null>(null);
+
+  // Agent log panel — hidden by default
+  const [showLog, setShowLog] = useState(false);
 
   const logRef = useRef<HTMLDivElement>(null);
   const iframeRef = useRef<HTMLIFrameElement>(null);
@@ -862,11 +873,12 @@ export function MatrixMirror({ sessionId }: { sessionId: string | null }) {
 
         {/* Left — Ghost DOM / Component Tree viewer */}
         <div style={{
-          width: '45%',
-          borderRight: `1px solid ${C.border}`,
+          width: showLog ? '45%' : '100%',
+          borderRight: showLog ? `1px solid ${C.border}` : 'none',
           display: 'flex',
           flexDirection: 'column',
           flexShrink: 0,
+          position: 'relative',
         }}>
           <div style={{
             height: 32,
@@ -884,6 +896,30 @@ export function MatrixMirror({ sessionId }: { sessionId: string | null }) {
               <span style={{ marginLeft: 'auto', fontSize: 10, color: tier === 'vdom' ? '#a78bfa' : tier === 'mobile-api' ? '#60a5fa' : C.teal }}>● LIVE</span>
             )}
           </div>
+
+          {/* Floating inspect button */}
+          <button
+            onClick={() => setShowLog(v => !v)}
+            title={showLog ? 'Close agent log' : 'Open agent log'}
+            style={{
+              position: 'absolute',
+              top: 6,
+              right: 10,
+              zIndex: 10,
+              background: showLog ? C.tealDim : '#111',
+              border: `1px solid ${showLog ? C.teal : '#333'}`,
+              borderRadius: 4,
+              color: showLog ? '#5eead4' : '#555',
+              fontFamily: C.font,
+              fontSize: 10,
+              fontWeight: 700,
+              padding: '2px 8px',
+              cursor: 'pointer',
+              letterSpacing: '0.08em',
+            }}
+          >
+            {showLog ? '✕ LOG' : '⌥ LOG'}
+          </button>
 
           {tier === 'vdom' || tier === 'mobile-api' ? (
             gdgMap ? (
@@ -939,7 +975,7 @@ export function MatrixMirror({ sessionId }: { sessionId: string | null }) {
         </div>
 
         {/* Right — Agent log */}
-        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+        {showLog && <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
           <div style={{
             height: 32,
             display: 'flex',
@@ -989,7 +1025,7 @@ export function MatrixMirror({ sessionId }: { sessionId: string | null }) {
               ))
             )}
           </div>
-        </div>
+        </div>}
       </div>
 
       {/* ── Bottom bar — Intervention ──────────────────────────────────────── */}
