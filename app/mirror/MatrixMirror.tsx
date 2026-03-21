@@ -82,7 +82,7 @@ function looksLikeUrl(s: string): boolean {
 // Inject badge + highlight + click-intercept script into Ghost DOM HTML
 function injectHollowScript(html: string, sessionUrl?: string): string {
   const baseTag = sessionUrl && sessionUrl !== '—'
-    ? `<base href="${sessionUrl}" target="_blank">`
+    ? `<base href="${sessionUrl}">`
     : '';
   const script = `<script>
 (function(){
@@ -105,12 +105,10 @@ function injectHollowScript(html: string, sessionUrl?: string): string {
       el.style.zIndex=el.style.zIndex||'1';
       el.appendChild(b);
     });
-    // Intercept all clicks — send to parent MatrixMirror
+    // Mirror clicks to parent MatrixMirror — let default behavior also proceed
     document.addEventListener('click',function(e){
       var el=e.target.closest('a,button,[role="button"]');
       if(!el)return;
-      e.preventDefault();
-      e.stopPropagation();
       var hollowId=el.dataset&&el.dataset.hollowId
         ?parseInt(el.dataset.hollowId)
         :null;
