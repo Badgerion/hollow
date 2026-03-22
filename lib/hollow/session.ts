@@ -102,10 +102,21 @@ export async function loadSession(sessionId: string): Promise<SessionState | nul
   }
 }
 
+const SESSION_INDEX_KEY = 'hollow:session-ids';
+
 export async function saveSession(state: SessionState): Promise<void> {
   const json = JSON.stringify(state);
   const stored = await compress(json);
   await kvSet(`hollow:session:${state.sessionId}`, stored, SESSION_TTL);
+  // Maintain an index list for /api/sessions enumeration (avoids KEYS scan)
+  if (hasRedis()) {
+    try {
+      await getRedis().rpush(SESSION_INDEX_KEY, state.sessionId);
+      await getRedis().expire(SESSION_INDEX_KEY, SESSION_TTL);
+    } catch { /* non-fatal — listing may be incomplete but sessions still work */ }
+  } else {
+    // memStore: the Map itself is the index, no extra bookkeeping needed
+  }
 }
 
 export async function deleteSession(sessionId: string): Promise<void> {
@@ -136,12 +147,14 @@ export function bumpSession(state: SessionState, html: string): SessionState {
 /**
  * List all active sessions — used by GET /api/sessions for the Mirror tab bar.
  * Returns lightweight metadata only (url, tier, confidence, updatedAt).
+ *
+ * Uses a dedicated index list (hollow:session-ids) instead of a KEYS scan —
+ * KEYS is unreliable in serverless environments with ioredis lazy connections.
  */
 export async function listSessions(): Promise<Pick<SessionState, 'sessionId' | 'url' | 'tier' | 'confidence' | 'updatedAt'>[]> {
-  const SESSION_PREFIX = 'hollow:session:';
-
-  // Local dev: enumerate in-memory store
+  // Local dev: enumerate in-memory store directly
   if (!hasRedis()) {
+    const SESSION_PREFIX = 'hollow:session:';
     const results: Pick<SessionState, 'sessionId' | 'url' | 'tier' | 'confidence' | 'updatedAt'>[] = [];
     for (const [key, value] of memStore.entries()) {
       if (!key.startsWith(SESSION_PREFIX)) continue;
@@ -155,12 +168,14 @@ export async function listSessions(): Promise<Pick<SessionState, 'sessionId' | '
   }
 
   try {
-    const keys = await getRedis().keys(`${SESSION_PREFIX}*`);
+    // Read the index list, deduplicate, then fetch each session's metadata
+    const rawIds = await getRedis().lrange<string>(SESSION_INDEX_KEY, 0, 199);
+    const uniqueIds = [...new Set(rawIds)];
     const results: Pick<SessionState, 'sessionId' | 'url' | 'tier' | 'confidence' | 'updatedAt'>[] = [];
-    for (const key of keys) {
+    for (const id of uniqueIds) {
       try {
-        const stored = await getRedis().get<string>(key);
-        if (!stored) continue;
+        const stored = await getRedis().get<string>(`hollow:session:${id}`);
+        if (!stored) continue; // Session TTL expired — skip
         const json = await decompress(stored);
         const state = JSON.parse(json) as SessionState;
         results.push({ sessionId: state.sessionId, url: state.url, tier: state.tier, confidence: state.confidence, updatedAt: state.updatedAt });
