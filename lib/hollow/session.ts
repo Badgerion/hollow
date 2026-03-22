@@ -137,8 +137,10 @@ export async function saveSession(state: SessionState): Promise<void> {
   const json = JSON.stringify(state);
   const stored = await compress(json);
   await kvSet(`hollow:session:${state.sessionId}`, stored, SESSION_TTL);
-  // Fire-and-forget — index failure never blocks session persistence
-  updateSessionsIndex(state).catch(() => {});
+  // Awaited — fire-and-forget is not safe in Vercel serverless (lambda exits
+  // on response, killing unawaited promises before they complete).
+  // updateSessionsIndex has its own try/catch so it never throws.
+  await updateSessionsIndex(state);
 }
 
 export async function deleteSession(sessionId: string): Promise<void> {
