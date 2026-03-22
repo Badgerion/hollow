@@ -38,6 +38,11 @@ interface MobileAPIConfig {
 // execute() fetches real post data from the public JSON API.
 // format() converts the JSON response into a GDG map the agent can read directly.
 
+const REDDIT_USER_AGENTS = [
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+  'Reddit/Version/2025.01 android/14',
+];
+
 async function redditExecute(url: string): Promise<unknown> {
   let apiPath = '/r/popular/hot.json';
   try {
@@ -48,27 +53,34 @@ async function redditExecute(url: string): Promise<unknown> {
     }
   } catch { /* use default */ }
 
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 10_000);
-  try {
-    const res = await fetch(`https://www.reddit.com${apiPath}?limit=25`, {
-      headers: {
-        'User-Agent': 'Reddit/Version/2025.01 android/14',
-        'Accept': 'application/json',
-      },
-      signal: controller.signal,
-    });
-    clearTimeout(timer);
-    if (!res.ok) {
-      console.log(`[hollow/router] Reddit execute: HTTP ${res.status} for ${apiPath}`);
-      return null;
+  const fetchUrl = `https://www.reddit.com${apiPath}?limit=25`;
+
+  // Try each User-Agent in order — browser UA often works from server IPs
+  // where Reddit blocks the mobile SDK UA.
+  for (const ua of REDDIT_USER_AGENTS) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 8_000);
+    try {
+      const res = await fetch(fetchUrl, {
+        headers: {
+          'User-Agent': ua,
+          'Accept': 'application/json',
+        },
+        signal: controller.signal,
+      });
+      clearTimeout(timer);
+      if (res.ok) {
+        console.log(`[hollow/router] Reddit execute: HTTP ${res.status} with UA: ${ua.slice(0, 30)}…`);
+        return await res.json();
+      }
+      console.log(`[hollow/router] Reddit execute: HTTP ${res.status} for ${apiPath} (ua: ${ua.slice(0, 30)}…)`);
+    } catch (err) {
+      clearTimeout(timer);
+      console.log(`[hollow/router] Reddit execute: fetch failed (${err instanceof Error ? err.message : err})`);
     }
-    return await res.json();
-  } catch (err) {
-    clearTimeout(timer);
-    console.log(`[hollow/router] Reddit execute: failed (${err instanceof Error ? err.message : err})`);
-    return null;
   }
+
+  return null;
 }
 
 interface RedditPost {
@@ -196,6 +208,37 @@ export async function tryMobileAPIBypass(url: string): Promise<MobileAPIResult |
   const config = MOBILE_API_REGISTRY[hostname];
   if (!config) return null;
 
+  // ── Path A: entries with execute() — execute IS the probe ─────────────────
+  // For APIs with public data (e.g. Reddit), we skip the separate probe and
+  // call execute() directly. This avoids a double-fetch and keeps total time
+  // within Vercel's lambda limit. If execute() returns null, we fall through
+  // to the standard pipeline (not a stub — the page should be navigable).
+  if (config.execute && config.format) {
+    console.log(`[hollow/router] Mobile API execute ${hostname}: fetching live data…`);
+    try {
+      const data = await config.execute(url);
+      if (data !== null) {
+        const gdgMap = config.format(data, url);
+        console.log(`[hollow/router] Mobile API execute ${hostname}: OK — ${gdgMap.split('\n').length} lines`);
+        return {
+          tier: 'mobile-api',
+          gdgMap,
+          endpoint: config.apiBase,
+          domain: hostname,
+          tokenEstimate: Math.ceil(gdgMap.length / 4),
+        };
+      }
+      console.log(`[hollow/router] Mobile API execute ${hostname}: returned null — falling through to pipeline`);
+      return null;
+    } catch (err) {
+      console.log(`[hollow/router] Mobile API execute ${hostname}: threw (${err instanceof Error ? err.message : err}) — falling through`);
+      return null;
+    }
+  }
+
+  // ── Path B: probe-only entries — return stub description ──────────────────
+  // For APIs that require auth (Twitter/X), a probe confirms the API is
+  // reachable and we return a stub telling the agent to provide credentials.
   const probeUrl = config.probePath.startsWith('http')
     ? config.probePath
     : config.apiBase + config.probePath;
@@ -215,31 +258,14 @@ export async function tryMobileAPIBypass(url: string): Promise<MobileAPIResult |
     });
     clearTimeout(timer);
 
-    // 200 or 401 both confirm the API exists and is reachable
+    // 200 or 401/403 all confirm the API exists and is reachable
     if (res.status !== 200 && res.status !== 401 && res.status !== 403) {
       console.log(`[hollow/router] Mobile API probe ${hostname}: HTTP ${res.status} — falling through`);
       return null;
     }
 
-    console.log(`[hollow/router] Mobile API probe ${hostname}: HTTP ${res.status} — MOBILE-API tier`);
-
-    // If the registry entry has an executor, fetch real data now.
-    // Fall back to the stub-description map only if execute() returns null.
-    let gdgMap: string;
-    if (config.execute && config.format) {
-      console.log(`[hollow/router] Mobile API execute ${hostname}: fetching live data…`);
-      const data = await config.execute(url);
-      if (data !== null) {
-        gdgMap = config.format(data, url);
-        console.log(`[hollow/router] Mobile API execute ${hostname}: got real data (${gdgMap.split('\n').length} lines)`);
-      } else {
-        console.log(`[hollow/router] Mobile API execute ${hostname}: no data returned, using stub`);
-        gdgMap = buildMobileAPIGDGMap(hostname, config);
-      }
-    } else {
-      gdgMap = buildMobileAPIGDGMap(hostname, config);
-    }
-
+    console.log(`[hollow/router] Mobile API probe ${hostname}: HTTP ${res.status} — MOBILE-API stub`);
+    const gdgMap = buildMobileAPIGDGMap(hostname, config);
     return {
       tier: 'mobile-api',
       gdgMap,
