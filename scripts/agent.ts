@@ -22,6 +22,14 @@ const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY ?? '';
 const MAX_STEPS = 15;
 const MAX_TABS = 5;
 const MODEL = 'claude-sonnet-4-20250514';
+// Truncate GDG maps in conversation history to keep token count under 30k TPM.
+// Full map is shown for the most recent step; older steps get a trimmed version.
+// Truncate GDG maps in older messages to ~40 lines
+const GDG_MAX_LINES = 40;
+// Sliding window — only send the last N messages to Claude per step.
+// The MEMORY section in each assistant turn recaps context, so old messages
+// are redundant and just burn tokens.
+const MAX_HISTORY_MESSAGES = 6;
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -181,6 +189,15 @@ Maximum ${MAX_TABS} tabs open simultaneously.
 Current open sessions:
 ${sessionManager.list()}
 
+Page tiers — how to read each map type:
+- TEXT tier: fast extraction of headings, paragraphs, and links. Read content directly.
+- MOBILE API tier: structured JSON data from the site's mobile API. The GDG map will show
+  endpoint information and raw JSON fields instead of visual elements. Read the JSON content
+  directly — post titles, scores, and metadata are in the map as field values, not as clickable
+  links. To get post content, look for 'title', 'score', 'num_comments' fields in the map.
+  You do not need to navigate further — the data is already in the map.
+- Other tiers (high/medium/low): standard spatial layout map with clickable elements.
+
 Rules:
 - Always output all four sections: EVALUATE, MEMORY, GOAL, ACTION.
 - ACTION must be a single valid JSON object on its own line.
@@ -193,6 +210,15 @@ Rules:
 
 async function callClaude(messages: Message[], sessionManager: SessionManager): Promise<string> {
   if (!ANTHROPIC_API_KEY) throw new Error('ANTHROPIC_API_KEY is not set');
+
+  // Sliding window — keep the initial task message + last MAX_HISTORY_MESSAGES.
+  // The MEMORY section in each assistant turn recaps context, so old turns are
+  // redundant and just accumulate tokens against the 30k TPM limit.
+  const windowed =
+    messages.length > MAX_HISTORY_MESSAGES + 1
+      ? [messages[0], ...messages.slice(-MAX_HISTORY_MESSAGES)]
+      : messages;
+
   const res = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
     headers: {
@@ -204,12 +230,20 @@ async function callClaude(messages: Message[], sessionManager: SessionManager): 
       model: MODEL,
       max_tokens: 1024,
       system: buildSystemPrompt(sessionManager),
-      messages,
+      messages: windowed,
     }),
   });
   if (!res.ok) throw new Error(`Anthropic API ${res.status}: ${await res.text()}`);
   const data = await res.json() as { content: { type: string; text: string }[] };
   return data.content.find(b => b.type === 'text')?.text ?? '';
+}
+
+// ─── GDG truncation — keeps token count under 30k TPM ────────────────────────
+
+function truncateGdg(map: string, maxLines: number): string {
+  const lines = map.split('\n');
+  if (lines.length <= maxLines) return map;
+  return lines.slice(0, maxLines).join('\n') + `\n… [truncated — ${lines.length - maxLines} more lines]`;
 }
 
 // ─── Parse action from reasoning text ────────────────────────────────────────
@@ -369,6 +403,20 @@ async function main() {
       gdgMap = newMap;
       sessionManager.update(currentSessionId, gdgMap);
       console.log('done');
+    }
+
+    // Truncate GDG in all prior user messages to keep token count manageable,
+    // then append the current page state at full fidelity.
+    for (const msg of messages) {
+      if (msg.role === 'user' && msg.content.startsWith('Action executed.')) {
+        const marker = '\n\n';
+        const idx = msg.content.indexOf(marker);
+        if (idx !== -1) {
+          const prefix = msg.content.slice(0, idx + marker.length);
+          const body = msg.content.slice(idx + marker.length);
+          msg.content = prefix + truncateGdg(body, GDG_MAX_LINES);
+        }
+      }
     }
 
     messages.push({
