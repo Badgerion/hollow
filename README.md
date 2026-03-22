@@ -7,6 +7,8 @@ Serverless web perception for AI agents. No Chromium. No BaaS. No GPU.
 [![Live](https://img.shields.io/badge/live-hollow--tan--omega.vercel.app-teal.svg)](https://hollow-tan-omega.vercel.app)
 [![GitHub](https://img.shields.io/badge/github-Badgerion%2Fhollow-gray.svg)](https://github.com/Badgerion/hollow)
 
+![Matrix Mirror — Hacker News loaded with TEXT tier, numbered element badges, 0.95 confidence, and live SSE pipeline log](https://raw.githubusercontent.com/Badgerion/hollow/main/assets/mirror-screenshot.png)
+
 ---
 
 ## The pain
