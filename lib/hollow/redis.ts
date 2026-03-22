@@ -26,6 +26,8 @@ export interface RedisClient {
   rpush(key: string, ...values: (string | object)[]): Promise<unknown>;
   expire(key: string, seconds: number): Promise<unknown>;
   lrange<T = string>(key: string, start: number, stop: number): Promise<T[]>;
+  /** Glob-pattern key scan. Only supports trailing-wildcard patterns (e.g. "prefix:*"). */
+  keys(pattern: string): Promise<string[]>;
 }
 
 // ─── Upstash REST adapter ─────────────────────────────────────────────────────
@@ -48,6 +50,7 @@ function makeUpstashClient(): RedisClient {
     rpush: (key: string, ...values: (string | object)[]) => client.rpush(key, ...values as string[]),
     expire: (key: string, seconds: number) => client.expire(key, seconds),
     lrange: <T>(key: string, start: number, stop: number) => client.lrange<T>(key, start, stop),
+    keys: (pattern: string) => client.keys(pattern),
   };
 }
 
@@ -90,6 +93,7 @@ function makeIORedisClient(): RedisClient {
         try { return JSON.parse(item) as T; } catch { return item as unknown as T; }
       });
     },
+    keys: (pattern: string) => redis.keys(pattern),
   };
 }
 

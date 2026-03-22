@@ -11,6 +11,7 @@ export const maxDuration = 60;
 
 import { NextRequest, NextResponse } from 'next/server';
 import { perceive } from '@/lib/hollow/pipeline';
+import { getStateProvider } from '@/lib/hollow/state-provider';
 import type { PerceiveRequest } from '@/lib/hollow/types';
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
@@ -40,7 +41,16 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       url: body.url,
       sessionId: body.sessionId,
       html: body.html,
+      stateId: body.stateId,
     });
+
+    // Hydra dehydrate — fire after pipeline completes, non-blocking for response
+    if (body.stateId) {
+      const provider = getStateProvider();
+      provider.dehydrate(result.sessionId, body.stateId, {}).catch(err => {
+        console.error('[hollow/hydra] dehydrate error:', err);
+      });
+    }
 
     return NextResponse.json(result, { status: 200 });
   } catch (err) {

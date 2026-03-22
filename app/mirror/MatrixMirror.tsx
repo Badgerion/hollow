@@ -6,6 +6,14 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 
 type LogTag = 'SYS' | 'GDG' | 'AI' | 'ACT' | 'OK' | 'WARN' | 'ERR';
 type Tier = 'hollow' | 'partial' | 'vdom' | 'mobile-api' | 'cache' | 'text';
+
+interface SessionTabEntry {
+  sessionId: string;
+  url: string;
+  tier: Tier | null;
+  confidence: number | null;
+  updatedAt: number;
+}
 type ConnStatus = 'disconnected' | 'connecting' | 'connected' | 'polling' | 'error';
 
 interface LogEntry {
@@ -659,6 +667,12 @@ export function MatrixMirror({ sessionId }: { sessionId: string | null }) {
   // Agent log panel — hidden by default
   const [showLog, setShowLog] = useState(false);
 
+  // Tab bar — concurrent sessions
+  const [tabs, setTabs] = useState<SessionTabEntry[]>([]);
+  const [showNewTab, setShowNewTab] = useState(false);
+  const [newTabInput, setNewTabInput] = useState('');
+  const [newTabLoading, setNewTabLoading] = useState(false);
+
   const logRef = useRef<HTMLDivElement>(null);
   const iframeRef = useRef<HTMLIFrameElement>(null);
 
@@ -667,6 +681,22 @@ export function MatrixMirror({ sessionId }: { sessionId: string | null }) {
     const el = logRef.current;
     if (el) el.scrollTop = el.scrollHeight;
   }, [log]);
+
+  // Poll /api/sessions every 5s to keep tab bar in sync with agent activity
+  useEffect(() => {
+    let alive = true;
+    async function fetchTabs() {
+      try {
+        const res = await fetch('/api/sessions');
+        if (!res.ok || !alive) return;
+        const data = await res.json() as { sessions: SessionTabEntry[] };
+        if (alive) setTabs(data.sessions ?? []);
+      } catch { /* silent — tab bar is non-critical */ }
+    }
+    fetchTabs();
+    const interval = setInterval(fetchTabs, 5000);
+    return () => { alive = false; clearInterval(interval); };
+  }, []);
 
   // Highlight active element in iframe via postMessage
   useEffect(() => {
@@ -904,6 +934,18 @@ export function MatrixMirror({ sessionId }: { sessionId: string | null }) {
     });
   }
 
+  async function openNewTab() {
+    const value = newTabInput.trim();
+    if (!value || newTabLoading) return;
+    setNewTabLoading(true);
+    try {
+      const result = await callPerceive(value);
+      window.location.href = `/mirror?session=${encodeURIComponent(result.sessionId)}`;
+    } catch {
+      setNewTabLoading(false);
+    }
+  }
+
   function submitIntervention() {
     const text = intervention.trim();
     if (!text || !sessionId) return;
@@ -1030,6 +1072,136 @@ export function MatrixMirror({ sessionId }: { sessionId: string | null }) {
         {/* QR session connector */}
         <QRConnector sessionId={sessionId} />
       </div>
+
+      {/* ── Session tab bar ───────────────────────────────────────────────── */}
+      {tabs.length > 0 && (
+        <div style={{
+          height: 34,
+          display: 'flex',
+          alignItems: 'stretch',
+          gap: 0,
+          borderBottom: `1px solid ${C.border}`,
+          background: '#080808',
+          flexShrink: 0,
+          overflowX: 'auto' as const,
+          overflowY: 'hidden' as const,
+        }}>
+          {tabs.map(tab => {
+            const isActive = tab.sessionId === sessionId || tab.sessionId === `sess:${sessionId}` || sessionId === `sess:${tab.sessionId}`;
+            let domain = tab.url;
+            try { domain = new URL(tab.url).hostname.replace(/^www\./, ''); } catch { /* keep raw */ }
+            return (
+              <div
+                key={tab.sessionId}
+                onClick={() => {
+                  const sid = tab.sessionId.startsWith('sess:') ? tab.sessionId.slice(5) : tab.sessionId;
+                  window.location.href = `/mirror?session=${encodeURIComponent(sid)}`;
+                }}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 6,
+                  padding: '0 10px',
+                  cursor: 'pointer',
+                  borderRight: `1px solid ${C.border}`,
+                  borderBottom: isActive ? `2px solid ${C.teal}` : '2px solid transparent',
+                  background: isActive ? '#0d0d0d' : 'transparent',
+                  flexShrink: 0,
+                  maxWidth: 200,
+                  minWidth: 80,
+                  userSelect: 'none' as const,
+                }}
+              >
+                <span style={{
+                  width: 6, height: 6, borderRadius: '50%', flexShrink: 0,
+                  background: isActive ? C.teal : '#333',
+                  boxShadow: isActive ? `0 0 5px ${C.teal}` : 'none',
+                }} />
+                <span style={{
+                  fontSize: 10,
+                  color: isActive ? C.text : '#555',
+                  overflow: 'hidden' as const,
+                  textOverflow: 'ellipsis' as const,
+                  whiteSpace: 'nowrap' as const,
+                  flex: 1,
+                  minWidth: 0,
+                }}>
+                  {domain}
+                </span>
+                {tab.tier && (
+                  <TierPill tier={tab.tier as Tier} />
+                )}
+              </div>
+            );
+          })}
+
+          {/* New tab button */}
+          {!showNewTab ? (
+            <button
+              onClick={() => setShowNewTab(true)}
+              style={{
+                padding: '0 12px',
+                background: 'transparent',
+                border: 'none',
+                borderRight: `1px solid ${C.border}`,
+                color: '#444',
+                fontFamily: C.font,
+                fontSize: 16,
+                cursor: 'pointer',
+                flexShrink: 0,
+                lineHeight: 1,
+              }}
+              title="Open new session tab"
+            >
+              +
+            </button>
+          ) : (
+            <div style={{ display: 'flex', alignItems: 'center', padding: '0 6px', gap: 4, flexShrink: 0 }}>
+              <input
+                autoFocus
+                type="text"
+                value={newTabInput}
+                onChange={e => setNewTabInput(e.target.value)}
+                onKeyDown={e => { if (e.key === 'Enter') openNewTab(); if (e.key === 'Escape') { setShowNewTab(false); setNewTabInput(''); } }}
+                placeholder="https://…"
+                style={{
+                  background: '#0a0a0a',
+                  border: `1px solid #2a2a2a`,
+                  borderRadius: 3,
+                  color: C.text,
+                  fontFamily: C.font,
+                  fontSize: 10,
+                  padding: '2px 8px',
+                  outline: 'none',
+                  width: 220,
+                }}
+              />
+              <button
+                onClick={openNewTab}
+                disabled={!newTabInput.trim() || newTabLoading}
+                style={{
+                  padding: '2px 8px',
+                  background: C.tealDim,
+                  border: `1px solid ${C.teal}`,
+                  borderRadius: 3,
+                  color: '#5eead4',
+                  fontFamily: C.font,
+                  fontSize: 10,
+                  cursor: 'pointer',
+                }}
+              >
+                {newTabLoading ? '…' : 'Go'}
+              </button>
+              <button
+                onClick={() => { setShowNewTab(false); setNewTabInput(''); }}
+                style={{ background: 'transparent', border: 'none', color: '#444', cursor: 'pointer', fontSize: 14, padding: '0 4px' }}
+              >
+                ×
+              </button>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* ── Main panels ───────────────────────────────────────────────────── */}
       <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>

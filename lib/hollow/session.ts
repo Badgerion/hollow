@@ -132,3 +132,42 @@ export function bumpSession(state: SessionState, html: string): SessionState {
     stepCount: state.stepCount + 1,
   };
 }
+
+/**
+ * List all active sessions — used by GET /api/sessions for the Mirror tab bar.
+ * Returns lightweight metadata only (url, tier, confidence, updatedAt).
+ */
+export async function listSessions(): Promise<Pick<SessionState, 'sessionId' | 'url' | 'tier' | 'confidence' | 'updatedAt'>[]> {
+  const SESSION_PREFIX = 'hollow:session:';
+
+  // Local dev: enumerate in-memory store
+  if (!hasRedis()) {
+    const results: Pick<SessionState, 'sessionId' | 'url' | 'tier' | 'confidence' | 'updatedAt'>[] = [];
+    for (const [key, value] of memStore.entries()) {
+      if (!key.startsWith(SESSION_PREFIX)) continue;
+      try {
+        const json = await decompress(value);
+        const state = JSON.parse(json) as SessionState;
+        results.push({ sessionId: state.sessionId, url: state.url, tier: state.tier, confidence: state.confidence, updatedAt: state.updatedAt });
+      } catch { /* skip corrupt entries */ }
+    }
+    return results;
+  }
+
+  try {
+    const keys = await getRedis().keys(`${SESSION_PREFIX}*`);
+    const results: Pick<SessionState, 'sessionId' | 'url' | 'tier' | 'confidence' | 'updatedAt'>[] = [];
+    for (const key of keys) {
+      try {
+        const stored = await getRedis().get<string>(key);
+        if (!stored) continue;
+        const json = await decompress(stored);
+        const state = JSON.parse(json) as SessionState;
+        results.push({ sessionId: state.sessionId, url: state.url, tier: state.tier, confidence: state.confidence, updatedAt: state.updatedAt });
+      } catch { /* skip corrupt entries */ }
+    }
+    return results;
+  } catch {
+    return [];
+  }
+}

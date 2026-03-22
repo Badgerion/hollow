@@ -154,6 +154,8 @@ export interface PerceiveRequest {
   sessionId?: string;
   /** Skip network fetch — parse this HTML directly. Useful for testing or pre-fetched content. */
   html?: string;
+  /** Hydra hook — opaque state ID passed to the registered StateProvider for hydrate/dehydrate. */
+  stateId?: string;
 }
 
 export interface ActAction {

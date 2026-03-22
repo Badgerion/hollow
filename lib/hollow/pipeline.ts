@@ -27,6 +27,7 @@ import { generateGDGSpatial } from './gdg-spatial';
 import { findFiberRoots, traverseFiber, generateVDOMMap } from './vdom';
 import { scoreConfidence } from './confidence';
 import { loadSession, saveSession, newSession, bumpSession } from './session';
+import { getStateProvider } from './state-provider';
 import { getEmitter } from './sse-emitter';
 import type { HollowPerceiveResult, PerceiveRequest, SessionState } from './types';
 import type { LayoutBox } from './yoga-layout';
@@ -383,6 +384,19 @@ export async function perceiveCore(req: PerceiveRequest): Promise<HollowPerceive
     message: `Session initialized. url: ${finalUrl}`,
     timestamp: now(),
   });
+
+  // ── Hydra inlet — hydrate state before any processing ────────────────────────
+  if (req.stateId) {
+    const provider = getStateProvider();
+    await provider.hydrate(sessionId, req.stateId);
+    emit.emit(sessionId, 'log_entry', {
+      tag: 'SYS',
+      message: `[hollow/hydra] State hydrated from stateId: ${req.stateId}`,
+      timestamp: now(),
+    });
+    // TODO: when a real provider is registered, inject hydratedState.cookies into
+    // document.cookie and hydratedState.localStorage into window.localStorage here.
+  }
 
   // ── Text-tier fast path — skip Happy DOM + Yoga for large text-heavy pages ────
   if (isTextHeavyPage(html, finalUrl)) {
