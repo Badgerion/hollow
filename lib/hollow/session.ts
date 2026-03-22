@@ -102,21 +102,43 @@ export async function loadSession(sessionId: string): Promise<SessionState | nul
   }
 }
 
-const SESSION_INDEX_KEY = 'hollow:session-ids';
+// Lightweight metadata stored in the session index (no html/gdgMap blobs)
+interface SessionIndexEntry {
+  sessionId: string;
+  url: string;
+  tier?: string;
+  confidence?: number;
+  updatedAt: number;
+}
+
+const SESSIONS_INDEX_KEY = 'hollow:sessions-index';
+const MAX_INDEX_ENTRIES = 50;
+
+/** Update the sessions index used by GET /api/sessions. Uses only get/set. */
+async function updateSessionsIndex(state: SessionState): Promise<void> {
+  if (!hasRedis()) return; // local dev uses memStore enumeration
+  try {
+    const redis = getRedis();
+    // Both Upstash and ioredis adapters auto-parse JSON on get()
+    const existing = await redis.get<SessionIndexEntry[]>(SESSIONS_INDEX_KEY);
+    let index: SessionIndexEntry[] = Array.isArray(existing) ? existing : [];
+    // Remove stale entry for this session, append fresh one
+    index = index.filter(e => e.sessionId !== state.sessionId);
+    index.push({ sessionId: state.sessionId, url: state.url, tier: state.tier, confidence: state.confidence, updatedAt: state.updatedAt });
+    // Cap at MAX_INDEX_ENTRIES (newest wins)
+    if (index.length > MAX_INDEX_ENTRIES) index = index.slice(-MAX_INDEX_ENTRIES);
+    await redis.set(SESSIONS_INDEX_KEY, JSON.stringify(index), { ex: SESSION_TTL });
+  } catch (err) {
+    console.error('[hollow/session] sessions index update failed (non-fatal):', err instanceof Error ? err.message : err);
+  }
+}
 
 export async function saveSession(state: SessionState): Promise<void> {
   const json = JSON.stringify(state);
   const stored = await compress(json);
   await kvSet(`hollow:session:${state.sessionId}`, stored, SESSION_TTL);
-  // Maintain an index list for /api/sessions enumeration (avoids KEYS scan)
-  if (hasRedis()) {
-    try {
-      await getRedis().rpush(SESSION_INDEX_KEY, state.sessionId);
-      await getRedis().expire(SESSION_INDEX_KEY, SESSION_TTL);
-    } catch { /* non-fatal — listing may be incomplete but sessions still work */ }
-  } else {
-    // memStore: the Map itself is the index, no extra bookkeeping needed
-  }
+  // Fire-and-forget — index failure never blocks session persistence
+  updateSessionsIndex(state).catch(() => {});
 }
 
 export async function deleteSession(sessionId: string): Promise<void> {
@@ -148,8 +170,8 @@ export function bumpSession(state: SessionState, html: string): SessionState {
  * List all active sessions — used by GET /api/sessions for the Mirror tab bar.
  * Returns lightweight metadata only (url, tier, confidence, updatedAt).
  *
- * Uses a dedicated index list (hollow:session-ids) instead of a KEYS scan —
- * KEYS is unreliable in serverless environments with ioredis lazy connections.
+ * Redis path: reads hollow:sessions-index (a JSON array written by saveSession).
+ * Only get/set are used — both confirmed working in serverless ioredis context.
  */
 export async function listSessions(): Promise<Pick<SessionState, 'sessionId' | 'url' | 'tier' | 'confidence' | 'updatedAt'>[]> {
   // Local dev: enumerate in-memory store directly
@@ -168,20 +190,15 @@ export async function listSessions(): Promise<Pick<SessionState, 'sessionId' | '
   }
 
   try {
-    // Read the index list, deduplicate, then fetch each session's metadata
-    const rawIds = await getRedis().lrange<string>(SESSION_INDEX_KEY, 0, 199);
-    const uniqueIds = [...new Set(rawIds)];
-    const results: Pick<SessionState, 'sessionId' | 'url' | 'tier' | 'confidence' | 'updatedAt'>[] = [];
-    for (const id of uniqueIds) {
-      try {
-        const stored = await getRedis().get<string>(`hollow:session:${id}`);
-        if (!stored) continue; // Session TTL expired — skip
-        const json = await decompress(stored);
-        const state = JSON.parse(json) as SessionState;
-        results.push({ sessionId: state.sessionId, url: state.url, tier: state.tier, confidence: state.confidence, updatedAt: state.updatedAt });
-      } catch { /* skip corrupt entries */ }
-    }
-    return results;
+    const index = await getRedis().get<SessionIndexEntry[]>(SESSIONS_INDEX_KEY);
+    if (!Array.isArray(index)) return [];
+    return index.map(e => ({
+      sessionId: e.sessionId,
+      url: e.url,
+      tier: e.tier as SessionState['tier'],
+      confidence: e.confidence,
+      updatedAt: e.updatedAt,
+    }));
   } catch {
     return [];
   }
