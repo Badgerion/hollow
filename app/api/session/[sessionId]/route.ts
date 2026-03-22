@@ -1,14 +1,15 @@
 /**
- * GET /api/session/:sessionId
+ * GET    /api/session/:sessionId — return session state (gdgMap, tier, confidence, url)
+ * DELETE /api/session/:sessionId — close and remove a session from Redis
  *
- * Returns the current session state including the last perceive result.
- * Used by the Mirror polling fallback when SSE is unavailable (Hobby tier).
+ * GET is used by the Mirror polling fallback (SSE unavailable) and hollow-mcp
+ * (hollow_session_get tool). DELETE is used by hollow-mcp (hollow_session_close tool).
  */
 
 export const runtime = 'nodejs';
 
 import { NextRequest, NextResponse } from 'next/server';
-import { loadSession } from '@/lib/hollow/session';
+import { loadSession, deleteSession } from '@/lib/hollow/session';
 
 export async function GET(
   _req: NextRequest,
@@ -36,4 +37,14 @@ export async function GET(
     stepCount:     session.stepCount,
     updatedAt:     session.updatedAt,
   });
+}
+
+export async function DELETE(
+  _req: NextRequest,
+  { params }: { params: { sessionId: string } },
+): Promise<NextResponse> {
+  const { sessionId: rawId } = params;
+  const sessionId = rawId.replace(/^sess:/, '');
+  await deleteSession(sessionId);
+  return NextResponse.json({ closed: true, sessionId: rawId });
 }
