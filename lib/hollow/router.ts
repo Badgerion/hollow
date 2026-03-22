@@ -163,8 +163,11 @@ function buildMobileAPIGDGMap(domain: string, config: MobileAPIConfig): string {
 // For them, cache is attempted BEFORE the Happy DOM pipeline.
 
 const CACHE_FIRST_DOMAINS = new Set([
-  'techcrunch.com', 'arstechnica.com', 'wired.com', 'theverge.com',
-  'wsj.com', 'ft.com', 'bloomberg.com', 'thenextweb.com', 'venturebeat.com',
+  // Note: arstechnica.com, techcrunch.com, wired.com, theverge.com,
+  // thenextweb.com, venturebeat.com, 9to5mac.com, macrumors.com are handled
+  // by the TEXT tier fast path in pipeline.ts — do NOT add them here, as
+  // cache-first fires before TEXT tier and would prevent the faster route.
+  'wsj.com', 'ft.com', 'bloomberg.com',
   'nytimes.com', 'washingtonpost.com', 'economist.com', 'businessinsider.com',
   'theatlantic.com', 'technologyreview.com', 'forbes.com', 'fortune.com',
 ]);

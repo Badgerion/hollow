@@ -43,6 +43,16 @@ function isTextHeavyPage(html: string, url: string): boolean {
     'old.reddit.com',
     'lobste.rs',
     'tildes.net',
+    // News article domains — TEXT tier is faster and more reliable than
+    // Happy DOM or cache for these primarily-HTML article sites.
+    'arstechnica.com',
+    'theverge.com',
+    'wired.com',
+    'techcrunch.com',
+    '9to5mac.com',
+    'macrumors.com',
+    'venturebeat.com',
+    'thenextweb.com',
   ];
 
   let domain: string;

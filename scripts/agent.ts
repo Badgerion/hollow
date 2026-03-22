@@ -74,6 +74,7 @@ interface TaskResult {
   finalAnswer: string;
   passed: boolean;
   timedOut: boolean;
+  skipped: boolean;
   error?: string;
   inputTokens: number;
   outputTokens: number;
@@ -84,6 +85,12 @@ interface BenchmarkTask {
   description: string;
   task: string;
   expectedTier: string;
+}
+
+// Thrown by callClaude after exhausting 429 retries — caught by runBenchmark
+// to log the task as SKIP rather than FAIL.
+class RateLimitSkipError extends Error {
+  constructor() { super('rate_limit_skip'); this.name = 'RateLimitSkipError'; }
 }
 
 // ─── Session Manager ──────────────────────────────────────────────────────────
@@ -257,38 +264,62 @@ Rules:
 async function callClaude(messages: Message[], sessionManager: SessionManager): Promise<ClaudeResponse> {
   if (!ANTHROPIC_API_KEY) throw new Error('ANTHROPIC_API_KEY is not set');
 
-  // Sliding window — keep the initial task message + last MAX_HISTORY_MESSAGES.
-  // The MEMORY section in each assistant turn recaps context, so old turns are
-  // redundant and just accumulate tokens against the 30k TPM limit.
+  // Dynamic sliding window — aggressive in multi-tab mode to avoid token blowout.
+  // In single-tab mode keep 6 messages; with 2+ tabs drop to 3.
+  const maxHistory = sessionManager.sessions.size > 1 ? 3 : MAX_HISTORY_MESSAGES;
   const windowed =
-    messages.length > MAX_HISTORY_MESSAGES + 1
-      ? [messages[0], ...messages.slice(-MAX_HISTORY_MESSAGES)]
+    messages.length > maxHistory + 1
+      ? [messages[0], ...messages.slice(-maxHistory)]
       : messages;
 
-  const res = await fetch('https://api.anthropic.com/v1/messages', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-api-key': ANTHROPIC_API_KEY,
-      'anthropic-version': '2023-06-01',
-    },
-    body: JSON.stringify({
-      model: MODEL,
-      max_tokens: 1024,
-      system: buildSystemPrompt(sessionManager),
-      messages: windowed,
-    }),
+  const body = JSON.stringify({
+    model: MODEL,
+    max_tokens: 1024,
+    system: buildSystemPrompt(sessionManager),
+    messages: windowed,
   });
-  if (!res.ok) throw new Error(`Anthropic API ${res.status}: ${await res.text()}`);
-  const data = await res.json() as {
-    content: { type: string; text: string }[];
-    usage: { input_tokens: number; output_tokens: number };
-  };
-  return {
-    text: data.content.find(b => b.type === 'text')?.text ?? '',
-    inputTokens: data.usage?.input_tokens ?? 0,
-    outputTokens: data.usage?.output_tokens ?? 0,
-  };
+
+  // 429 retry with exponential backoff.
+  // Attempt 0 → wait 60 s → attempt 1 → wait 120 s → attempt 2 → throw RateLimitSkipError.
+  const RETRY_WAITS = [60_000, 120_000];
+
+  for (let attempt = 0; attempt <= RETRY_WAITS.length; attempt++) {
+    const res = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01',
+      },
+      body,
+    });
+
+    if (res.status === 429) {
+      if (attempt >= RETRY_WAITS.length) {
+        console.log('\n  Rate limited (429) — exhausted retries, skipping task.');
+        throw new RateLimitSkipError();
+      }
+      const waitSec = RETRY_WAITS[attempt] / 1000;
+      console.log(`\n  Rate limited (429) — waiting ${waitSec}s before retry ${attempt + 1}…`);
+      await sleep(RETRY_WAITS[attempt]);
+      continue;
+    }
+
+    if (!res.ok) throw new Error(`Anthropic API ${res.status}: ${await res.text()}`);
+
+    const data = await res.json() as {
+      content: { type: string; text: string }[];
+      usage: { input_tokens: number; output_tokens: number };
+    };
+    return {
+      text: data.content.find(b => b.type === 'text')?.text ?? '',
+      inputTokens: data.usage?.input_tokens ?? 0,
+      outputTokens: data.usage?.output_tokens ?? 0,
+    };
+  }
+
+  // Unreachable — TypeScript needs this.
+  throw new RateLimitSkipError();
 }
 
 // ─── GDG truncation — keeps token count under 30k TPM ────────────────────────
@@ -406,6 +437,7 @@ async function runTask(
         finalAnswer: answer,
         passed: answer.trim().length > 0,
         timedOut: false,
+        skipped: false,
         inputTokens: totalInputTokens,
         outputTokens: totalOutputTokens,
       };
@@ -529,6 +561,7 @@ async function runTask(
     finalAnswer: '',
     passed: false,
     timedOut: true,
+    skipped: false,
     inputTokens: totalInputTokens,
     outputTokens: totalOutputTokens,
   };
@@ -648,7 +681,8 @@ async function runBenchmark() {
         finalAnswer: '',
         passed: false,
         timedOut: false,
-        error: msg,
+        skipped: err instanceof RateLimitSkipError,
+        error: err instanceof RateLimitSkipError ? undefined : msg,
         inputTokens: 0,
         outputTokens: 0,
       };
@@ -656,10 +690,10 @@ async function runBenchmark() {
 
     results.push(result);
 
-    // Brief pause between tasks to avoid rate limits
+    // 70 s pause between tasks — gives the 30k TPM window time to drain fully.
     if (bt.num < BENCHMARK_TASKS.length) {
-      console.log('  Pausing 5 s before next task…');
-      await sleep(5000);
+      console.log('  Pausing 70 s before next task (TPM cooldown)…');
+      await sleep(70_000);
     }
   }
 
@@ -687,13 +721,15 @@ async function runBenchmark() {
   let totalTokensOut = 0;
 
   for (const r of results) {
-    const status = r.error
-      ? '✗ ERR'
-      : r.timedOut
-        ? '✗ TIMEOUT'
-        : r.passed
-          ? '✓ PASS'
-          : '✗ FAIL';
+    const status = r.skipped
+      ? '⊘ SKIP'
+      : r.error
+        ? '✗ ERR'
+        : r.timedOut
+          ? '✗ TIMEOUT'
+          : r.passed
+            ? '✓ PASS'
+            : '✗ FAIL';
 
     const tier = r.tiersUsed.join('+') || '—';
     const avgConf = r.confidences.length
@@ -717,9 +753,11 @@ async function runBenchmark() {
     totalTokensOut += r.outputTokens;
   }
 
+  const totalSkip = results.filter(r => r.skipped).length;
   console.log('  ' + '─'.repeat(header.length));
-  console.log(`\n  Passed : ${totalPass} / ${BENCHMARK_TASKS.length}`);
-  console.log(`  Failed : ${BENCHMARK_TASKS.length - totalPass} / ${BENCHMARK_TASKS.length}`);
+  console.log(`\n  Passed  : ${totalPass} / ${BENCHMARK_TASKS.length}`);
+  console.log(`  Failed  : ${BENCHMARK_TASKS.length - totalPass - totalSkip} / ${BENCHMARK_TASKS.length}`);
+  console.log(`  Skipped : ${totalSkip} / ${BENCHMARK_TASKS.length} (rate limit exhausted)`);
   console.log(`  Tokens : ${totalTokensIn} in / ${totalTokensOut} out (${totalTokensIn + totalTokensOut} total)`);
   console.log(`  Mirror : ${mirrorUrl}\n`);
 
@@ -729,7 +767,9 @@ async function runBenchmark() {
   console.log(`${'═'.repeat(72)}\n`);
   for (const r of results) {
     console.log(`  [Task ${r.taskNum}] ${r.description}`);
-    if (r.error) {
+    if (r.skipped) {
+      console.log('    SKIPPED — rate limit exhausted after retries.');
+    } else if (r.error) {
       console.log(`    ERROR: ${r.error}`);
     } else if (r.timedOut) {
       console.log('    TIMED OUT — hit max steps without completing.');
