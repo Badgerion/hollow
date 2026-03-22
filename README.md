@@ -1,129 +1,141 @@
 # Hollow
 
 **A browser that has never run on a machine.**
+Serverless web perception for AI agents. No Chromium. No BaaS. No GPU.
 
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
-[![Deploy](https://img.shields.io/badge/deploy-Vercel-black.svg)](https://vercel.com)
 [![Live](https://img.shields.io/badge/live-hollow--tan--omega.vercel.app-teal.svg)](https://hollow-tan-omega.vercel.app)
+[![GitHub](https://img.shields.io/badge/github-Badgerion%2Fhollow-gray.svg)](https://github.com/Badgerion/hollow)
 
 ---
 
-Hollow is a serverless DOM interpreter. It has the functional output of a browser — parsed DOM, executed JavaScript, calculated layout, navigable state — but exists purely as a web service. No Chromium. No GPU. No persistent process. No BaaS vendor.
+## The pain
 
-It runs on Vercel. It is accessible via a URL. An AI agent can operate it with the laptop closed.
+Every AI agent that needs to browse the web is paying for a machine to run a browser.
 
-![Matrix Mirror — Hacker News live session](assets/mirror-screenshot.png)
+You're either spinning up a VPS, paying Browserbase $0.05 per minute, managing a Puppeteer cluster that someone has to own and monitor, or waiting 4–8 seconds for a cold Chromium boot just to read a webpage. All of that infrastructure. All of that cost. All of that operational weight. Just so a model can read text that was already in the HTML.
 
-The agent reads the [GDG Spatial](https://github.com/Badgerion/GDG-browser) map. It decides what to do. It acts.
+Hollow removes the machine entirely. POST a URL, get back a structured map of the page. No process to boot. No GPU. No vendor invoice at the end of the month. No server to own.
 
----
-
-## Why
-
-Every AI agent that needs to perceive the web chooses between two bad options:
-
-**Headless Chrome** — real rendering, real coordinates. But 300MB binary, persistent VM process, $0.02–0.05/minute at BaaS providers, cold starts of 2–4 seconds, bot detection at the TLS handshake level.
-
-**DOM simulators (JSDOM, Happy DOM)** — cheap and fast. But no layout engine, `getBoundingClientRect()` returns zero, no spatial map possible, silent JS failures.
-
-Neither was designed for AI agents. Both were designed for humans.
-
-Hollow is the third option: a browser engine purpose-built for machines. It calculates exact layout coordinates without painting a single pixel.
-
----
-
-## How it works
-
-A browser has two separable concerns: **layout** (where things are) and **painting** (how they look). Painting requires a GPU. Layout is pure mathematics — box model, flexbox rules, grid rules, cascade resolution.
-
-Hollow strips the paint layer entirely and keeps the layout engine.
-
-```
-What a browser does for humans:     What Hollow keeps:
-────────────────────────────────    ──────────────────
-Fetch HTML/CSS/JS          ✓        Fetch HTML/CSS/JS
-Parse DOM                  ✓        Parse DOM
-Execute JavaScript         ✓        Execute JavaScript
-Calculate layout           ✓        Calculate layout
-Paint pixels to GPU        ✗        — dropped —
-Composite layers           ✗        — dropped —
-Display to screen          ✗        — dropped —
+```bash
+curl -X POST https://hollow-tan-omega.vercel.app/api/perceive \
+  -H "Content-Type: application/json" \
+  -d '{"url": "https://news.ycombinator.com"}'
 ```
 
-The pipeline:
-
-1. **Network layer** — fetches the URL mimicking Chrome's TLS cipher suites (JA3/JA4)
-2. **Happy DOM** — parses HTML, executes JavaScript, intercepts errors
-3. **CSS resolver** — extracts computed styles: flexbox, grid, block/inline, position, box model
-4. **Yoga layout engine** — calculates exact X/Y/W/H for every element. No screen. No GPU.
-5. [**GDG Spatial**](https://github.com/Badgerion/GDG-browser) — converts coordinates to a structured spatial tree the AI reads
-6. **Redis** — serializes session state (Brotli compressed) between steps
-
----
-
-## [GDG Spatial](https://github.com/Badgerion/GDG-browser)
-
-[GDG Spatial](https://github.com/Badgerion/GDG-browser) is Hollow's perception format. It gives AI agents a token-efficient, action-indexed map of the page — structured for how models reason, not how humans see.
-
-```
-[Viewport: 1280x800]
-
-[nav: flex-row y:0 h:44]
-  [1] a "Home"          x:0    w:80   h:44
-  [2] a "About"         x:80   w:80   h:44
-  [3] a "Login"         x:160  w:80   h:44
-
-[main: flex-col y:44]
-  [4] input:email       x:40   y:84   w:400  h:44
-  [5] input:password    x:40   y:140  w:400  h:44
-  [6] button "Submit"   x:40   y:196  w:400  h:48
-
-[footer: grid 3-col y:276 h:60]
-  [7] a "Privacy"       col:1
-  [8] a "Terms"         col:2
-  [9] a "Contact"       col:3
+```json
+{
+  "sessionId": "sess:abc123",
+  "gdgMap": "[TEXT: news.ycombinator.com]\n\n[Stories:]\n  [1] \"Ask HN: Who is hiring? (March 2026)\"\n      comments:834  link:[1]\n  [2] \"Show HN: I built a serverless browser\"\n      comments:291  link:[2]\n...",
+  "confidence": 0.95,
+  "tier": "text"
+}
 ```
 
-57–400 tokens per page. A screenshot costs 800–1500. [GDG Spatial](https://github.com/Badgerion/GDG-browser) is 10–20x cheaper and carries semantic information a vision model has to infer.
+Response in under 2 seconds. No Chromium.
 
 ---
 
-## The Hollow Router
+## The performance
 
-Not all sites need the same approach. Hollow makes a tactical routing decision before touching the network:
+Running the same 10-task agent benchmark — reading HN, Reddit, news sites, multi-tab comparisons, deep reads — across Hollow and a managed headless browser:
 
-| Route | Method | Coverage | Cost |
-|-------|--------|----------|------|
-| Mobile API Bypass | Format as iOS/Android client | Twitter/X, Reddit, Spotify | $0.00001/req |
-| Cache Bypass | Bing Cache / Wayback Machine | Read-only research tasks | $0.00001/req |
-| Hollow Standard | Happy DOM + Yoga | ~60% of the web | $0.00001/req |
-| VDOM Hijack | Extract React/Vue Fiber tree | Gmail, Notion, Linear | $0.00005/req |
-| WebSocket Telepathy | Raw WebSocket connection | Figma, Google Docs | $0.0001/req |
-| API Telepathy | XHR interception + schema extraction | Canvas apps | $0.001/req |
-| PWA Relay | User's phone as checkpoint | High-security WAFs | User attention |
+| | Hollow | Browserbase / Puppeteer |
+|---|---|---|
+| Cold start | 0 ms (serverless) | 4,000–8,000 ms |
+| HN front page | ~1.8 s | ~6 s |
+| Reddit r/programming | ~2.1 s | ~8 s |
+| Per-task browser cost | ~$0.0003 | ~$0.30–$3.00 |
+| Infrastructure | None | VM or managed cluster |
+| Concurrent sessions | Unlimited | Plan-limited |
+| Tasks passed (10 total) | **9 / 10** | — |
 
-**Zero Chromium. Zero BaaS. Zero vendor dependency.**
-
-The 7% that hits PWA Relay is mostly high-stakes tasks (financial transactions, irreversible actions) that warrant human sign-off anyway.
+The agent ran 15 steps across 4 concurrent tabs, summarised an HN comment thread, compared Reddit and HN front pages simultaneously, and followed multi-step research chains. Laptop closed the entire time.
 
 ---
 
-## Matrix Mirror
+## The demo
 
-Matrix Mirror is the observability UI — the human cockpit for Hollow sessions.
+Open the Matrix Mirror — Hollow's observability UI:
 
-`hollow-tan-omega.vercel.app/mirror`
+**[hollow-tan-omega.vercel.app/mirror](https://hollow-tan-omega.vercel.app/mirror)**
 
-- **Start screen** — type a URL, hit GO. No curl. No session IDs.
-- **Ghost DOM viewer** — the HTML Hollow has in memory, rendered live. You see exactly what the agent sees, including what it can't see.
-- **Agent log** — timestamped stream of every perception, action, and decision.
-- **Intervention bar** — type an instruction, inject it into the agent's next step.
+Type any URL. Watch the pipeline route it. See element badges on every actionable element, the confidence score, and which tier fired. Every active session has a QR code in the top bar — scan it and paste the one-liner into any AI to hand off a live browser session instantly.
+
+Public demo is rate-limited to 10 requests per minute per IP. [Deploy your own instance](#deploy-your-own) for production use.
 
 ---
 
-## Quickstart
+## How it routes
 
-### Deploy your own
+Not every page needs the same approach. Hollow detects the right path automatically and returns the fastest, highest-confidence map for each site type.
+
+| Tier | What it does | Example sites | Typical latency |
+|------|-------------|---------------|----------------|
+| **TEXT** | Regex extraction — no DOM at all | Hacker News, lobste.rs, Reddit threads, Ars Technica, The Verge, Wired | < 2 s |
+| **MOBILE API** | Fetches the site's own mobile JSON API | Reddit (live posts, scores, comments), Twitter/X | < 2 s |
+| **HOLLOW** | Happy DOM + Yoga layout + GDG Spatial | GitHub, docs, most of the web | 3–8 s |
+| **CACHE** | Wayback Machine or Bing cache fallback | Paywalled sites, WAF-blocked | 2–5 s |
+| **PARTIAL** | Graceful degradation on error | Anything that returns a non-200 | instant |
+
+Zero Chromium at every tier. The TEXT and MOBILE paths never touch a DOM engine at all.
+
+---
+
+## Connect an agent in 30 lines
+
+```typescript
+import Anthropic from "@anthropic-ai/sdk"
+
+const client = new Anthropic()
+const HOLLOW = "https://hollow-tan-omega.vercel.app"
+
+async function runAgent(task: string) {
+  // Load the first page
+  let { sessionId, gdgMap } = await fetch(`${HOLLOW}/api/perceive`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ url: "https://www.startpage.com" }),
+  }).then(r => r.json())
+
+  for (let step = 0; step < 15; step++) {
+    const response = await client.messages.create({
+      model: "claude-sonnet-4-20250514",
+      max_tokens: 1024,
+      system: `You are an AI agent using Hollow, a serverless browser.
+You receive GDG Spatial maps — structured page trees with actionable element IDs.
+Respond with one JSON action:
+{ "type": "navigate", "url": "https://..." }
+{ "type": "click",    "elementId": 3 }
+{ "type": "fill",     "elementId": 4, "value": "search term" }
+{ "type": "done",     "result": "your complete answer" }`,
+      messages: [{ role: "user", content: `Task: ${task}\n\nPage:\n${gdgMap}` }],
+    })
+
+    const action = JSON.parse(response.content[0].text)
+    if (action.type === "done") return action.result
+
+    const next = await fetch(`${HOLLOW}/api/act`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sessionId, action }),
+    }).then(r => r.json())
+
+    gdgMap = next.gdgMap
+  }
+}
+
+runAgent("What are the top 5 posts on Hacker News right now?")
+  .then(console.log)
+```
+
+The `gdgMap` string is the only interface. Every tier returns the same shape — navigate, act, read, repeat.
+
+---
+
+## Deploy your own
+
+Hollow is a standard Next.js app. No binaries. No Docker. No Chromium to install.
 
 ```bash
 git clone https://github.com/Badgerion/hollow
@@ -131,7 +143,7 @@ cd hollow
 npm install
 ```
 
-Set environment variables:
+Create an [Upstash Redis](https://upstash.com) database and add to `.env.local`:
 
 ```env
 UPSTASH_REDIS_REST_URL=your_upstash_url
@@ -142,203 +154,52 @@ UPSTASH_REDIS_REST_TOKEN=your_upstash_token
 vercel deploy
 ```
 
-### Use the API
-
-**Start a session:**
-
-```bash
-curl -X POST https://your-deployment.vercel.app/api/perceive \
-  -H "Content-Type: application/json" \
-  -d '{"url": "https://news.ycombinator.com"}'
-```
-
-**Act on an element:**
-
-```bash
-curl -X POST https://your-deployment.vercel.app/api/act \
-  -H "Content-Type: application/json" \
-  -d '{
-    "sessionId": "sess:abc123",
-    "action": { "type": "click", "elementId": 3 }
-  }'
-```
-
-**Watch in the Mirror:**
-
-```
-https://your-deployment.vercel.app/mirror?session=sess:abc123
-```
-
-### Connect an AI agent
-
-```typescript
-import Anthropic from "@anthropic-ai/sdk";
-
-const client = new Anthropic();
-const HOLLOW = "https://hollow-tan-omega.vercel.app";
-
-async function runAgent(task: string) {
-  // Start Hollow session — agent decides where to go
-  let { sessionId, gdgMap } = await fetch(`${HOLLOW}/api/perceive`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ url: "about:blank" }),
-  }).then((r) => r.json());
-
-  for (let step = 0; step < 10; step++) {
-    const response = await client.messages.create({
-      model: "claude-sonnet-4-20250514",
-      max_tokens: 1024,
-      system: `You are an AI agent operating a browser through Hollow.
-You receive a [GDG Spatial](https://github.com/Badgerion/GDG-browser) map of the current page.
-Actionable elements have IDs like [1], [2], [3].
-
-Respond with JSON only:
-{ "action": "navigate", "url": "https://..." }
-{ "action": "click", "elementId": 3 }
-{ "action": "fill", "elementId": 4, "value": "text" }
-{ "action": "done", "result": "your answer" }`,
-      messages: [
-        { role: "user", content: `Task: ${task}\n\nPage:\n${gdgMap}` },
-      ],
-    });
-
-    const decision = JSON.parse(response.content[0].text);
-    if (decision.action === "done") return decision.result;
-
-    const next = await fetch(`${HOLLOW}/api/act`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ sessionId, action: decision }),
-    }).then((r) => r.json());
-
-    gdgMap = next.gdgMap;
-  }
-}
-
-runAgent("What are the top 3 stories on Hacker News right now?").then(
-  console.log
-);
-```
+A cold Vercel deploy from zero takes about 3 minutes. A warm response is under 2 seconds on the TEXT tier, under 8 on HOLLOW. Set a spend limit in your Vercel dashboard before making it public.
 
 ---
 
-## API reference
+## API
 
-### POST /api/perceive
+### `POST /api/perceive` — load a page, start a session
 
-Fetch a URL and start a session.
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `url` | string | URL to fetch |
-| `html` | string | Raw HTML (bypasses network fetch) |
-| `sessionId` | string | Resume existing session |
-| `stateId` | string | Hydra state provider hook (optional) |
-
-Returns `{ sessionId, gdgMap, domDelta, confidence, jsErrors[], tier }`.
-
-### POST /api/act
-
-Apply an action to an existing session.
-
-| Action type | Fields |
-|-------------|--------|
-| `click` | `elementId` |
-| `fill` | `elementId`, `value` |
-| `navigate` | `url` |
-| `scroll` | `elementId`, `direction` |
-| `select` | `elementId`, `value` |
-| `hover` | `elementId` |
-
-### GET /api/stream/:sessionId
-
-SSE stream. Events: `dom_delta`, `log_entry`, `gdg_map`, `confidence`, `tier`.
-
-### GET /api/session/:sessionId
-
-Current session state. Used by Matrix Mirror polling fallback.
-
-### DELETE /session/:sessionId
-
-Clear session from Redis.
-
----
-
-## Confidence scoring
-
-Hollow scores each perception step from 0.0 to 1.0. Steps below 0.8 escalate to the next Router route.
-
+```json
+{ "url": "https://...", "sessionId": "optional-existing", "stateId": "optional-hydra" }
 ```
-base: 1.0
--0.05  per absolute/fixed positioned element
--0.10  per JS error (Vitality Monitor)
--0.05  per transform-positioned element
--0.03  per unresolved CSS variable affecting layout
--0.05  per JS-driven resize detected
+```json
+→ { "sessionId": "sess:...", "gdgMap": "...", "confidence": 0.95, "tier": "text" }
 ```
 
-The JS Vitality Monitor surfaces every Happy DOM failure in the Matrix Mirror log — turning silent failures into observable signals.
+### `POST /api/act` — interact with the current session
 
----
+```json
+{ "sessionId": "sess:...", "action": { "type": "click", "elementId": 3 } }
+```
+```json
+→ { "sessionId": "sess:...", "gdgMap": "...", "confidence": 0.97, "tier": "hollow" }
+```
 
-## Architecture decisions
+Action types: `navigate` · `click` · `fill` · `scroll` · `select` · `hover`
 
-**Why not Chromium on Lambda?**
-Running a Chromium binary — even compressed — makes Hollow just another company running a bloated browser in the cloud. The Hollow Router eliminates the need. The hard 7% routes to PWA Relay on the user's phone.
+### `GET /api/sessions` — list active sessions
 
-**Why not BaaS (Browserbase, Steel)?**
-Vendor dependency, surrendered margins, architectural impurity. The Router owns the full stack at a fraction of the cost.
+```json
+→ { "sessions": [{ "sessionId": "sess:...", "url": "...", "tier": "text", "updatedAt": 1742547200 }] }
+```
 
-**Why yoga-layout-prebuilt and not yoga-layout (WASM)?**
-The WASM build hangs indefinitely on Vercel serverless cold starts. The prebuilt synchronous JS build is correct for this environment.
+### `GET /api/stream/:sessionId` — SSE pipeline log
 
-**Why Upstash Redis and not Vercel KV?**
-Upstash supports pub/sub for SSE event streaming across separate serverless function instances. Vercel KV is deprecated in favour of Upstash anyway.
+Real-time events from the perception pipeline. Each step emits a `log_entry` event with tag, message, and timestamp. Used by the Mirror.
 
----
-
-## Roadmap
-
-**Phase 2 — The Router**
-- [ ] VDOM Hijack (React/Vue Fiber tree extraction)
-- [ ] WebSocket Telepathy + Skills registry
-- [ ] API Telepathy (Canvas app detection)
-- [ ] Mobile API Bypass
-- [ ] Cache Bypass (Bing + Wayback Machine)
-- [ ] PWA Relay (phone-based human checkpoint)
-- [ ] Happy DOM polyfills (TextEncoder, IntersectionObserver...)
-- [ ] Concurrent sessions (tabs)
-- [x] Agent loop script (task-in, result-out, no URL required)
-- [ ] Matrix Mirror v2 (macOS desktop, tab bar)
-- [ ] Hydra inlet stub (StateProvider interface)
-
-**Phase 3 — Standard**
-- [ ] WASM → Cloudflare Workers
-- [ ] ArtDOM open spec
-- [ ] Framework native integrations (LangChain, AutoGen, CrewAI)
+### `GET /mirror` — observability UI
 
 ---
 
 ## License
 
-Hollow is dual-licensed.
+Apache 2.0 for personal use, research, open source, and internal business use.
 
-**Open source** — Apache License 2.0. Free to use, modify, and deploy for any purpose, including commercial use, subject to the terms of the Apache 2.0 license. See [LICENSE](LICENSE).
-
-**Commercial license** — For teams that need a private fork, white-label rights, SLA-backed support, or a managed deployment on your own infrastructure, a commercial license is available from Artiqal Labs. Contact [hello@artiqal.com](mailto:hello@artiqal.com).
+Commercial license required if you're offering Hollow as a hosted service to third parties. Reach out.
 
 ---
 
-## Contributing
-
-Issues and PRs welcome. See [CONTRIBUTING.md](CONTRIBUTING.md).
-
-The most valuable contributions right now:
-- Happy DOM polyfills (TextEncoder, IntersectionObserver, ResizeObserver)
-- WebSocket schema Skills for popular apps
-- [GDG Spatial](https://github.com/Badgerion/GDG-browser) ground-truth calibration data
-
----
-
-*Built by Artiqal Labs. Hollow is the browser that was never built for you.*
+*Built by [Artiqal Labs](https://artiqal.vercel.app/). Hollow is the browser that was never built for you.*
