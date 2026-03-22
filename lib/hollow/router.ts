@@ -34,54 +34,16 @@ interface MobileAPIConfig {
 }
 
 // ─── Reddit executor ──────────────────────────────────────────────────────────
-// Shared execute + format for reddit.com and old.reddit.com.
-// execute() fetches real post data from the public JSON API.
-// format() converts the JSON response into a GDG map the agent can read directly.
+// Three-tier fetch strategy for Reddit:
+//   1. JSON API with browser Chrome UA  (best — has scores + comment counts)
+//   2. JSON API with Reddit mobile UA   (fallback — same data)
+//   3. Atom/RSS feed                    (last resort — titles + links only, no scores)
+// If all three fail (Reddit blocks server IPs entirely), execute() returns a
+// sentinel { blocked: true, subreddit } so format() can emit a redirect stub
+// telling the agent to search via Startpage instead.
 
-const REDDIT_USER_AGENTS = [
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-  'Reddit/Version/2025.01 android/14',
-];
-
-async function redditExecute(url: string): Promise<unknown> {
-  let apiPath = '/r/popular/hot.json';
-  try {
-    const urlObj = new URL(url);
-    const parts = urlObj.pathname.split('/').filter(Boolean);
-    if (parts[0] === 'r' && parts[1]) {
-      apiPath = `/r/${parts[1]}/hot.json`;
-    }
-  } catch { /* use default */ }
-
-  const fetchUrl = `https://www.reddit.com${apiPath}?limit=25`;
-
-  // Try each User-Agent in order — browser UA often works from server IPs
-  // where Reddit blocks the mobile SDK UA.
-  for (const ua of REDDIT_USER_AGENTS) {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 8_000);
-    try {
-      const res = await fetch(fetchUrl, {
-        headers: {
-          'User-Agent': ua,
-          'Accept': 'application/json',
-        },
-        signal: controller.signal,
-      });
-      clearTimeout(timer);
-      if (res.ok) {
-        console.log(`[hollow/router] Reddit execute: HTTP ${res.status} with UA: ${ua.slice(0, 30)}…`);
-        return await res.json();
-      }
-      console.log(`[hollow/router] Reddit execute: HTTP ${res.status} for ${apiPath} (ua: ${ua.slice(0, 30)}…)`);
-    } catch (err) {
-      clearTimeout(timer);
-      console.log(`[hollow/router] Reddit execute: fetch failed (${err instanceof Error ? err.message : err})`);
-    }
-  }
-
-  return null;
-}
+const REDDIT_BROWSER_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36';
+const REDDIT_MOBILE_UA  = 'Reddit/Version/2025.01 android/14';
 
 interface RedditPost {
   title: string;
@@ -91,14 +53,142 @@ interface RedditPost {
   url: string;
   permalink: string;
   subreddit: string;
-  is_self: boolean;
 }
 
 interface RedditListing {
   data?: { children?: Array<{ data: RedditPost }> };
 }
 
+interface RedditAtomEntry { title: string; href: string; author: string; }
+interface RedditAtomResult { type: 'atom'; subreddit: string; entries: RedditAtomEntry[]; }
+interface RedditBlockedResult { type: 'blocked'; subreddit: string; }
+
+async function redditFetchJson(fetchUrl: string, ua: string): Promise<RedditListing | null> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 8_000);
+  try {
+    const res = await fetch(fetchUrl, {
+      headers: { 'User-Agent': ua, 'Accept': 'application/json' },
+      signal: controller.signal,
+    });
+    clearTimeout(timer);
+    if (res.ok) return await res.json() as RedditListing;
+    console.log(`[hollow/router] Reddit JSON ${res.status} (ua: ${ua.slice(0, 20)}…)`);
+    return null;
+  } catch (err) {
+    clearTimeout(timer);
+    console.log(`[hollow/router] Reddit JSON fetch failed: ${err instanceof Error ? err.message : err}`);
+    return null;
+  }
+}
+
+async function redditFetchAtom(subreddit: string): Promise<RedditAtomResult | null> {
+  const atomUrl = `https://www.reddit.com/r/${subreddit}/hot.rss?limit=25`;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 8_000);
+  try {
+    const res = await fetch(atomUrl, {
+      headers: {
+        'User-Agent': REDDIT_BROWSER_UA,
+        'Accept': 'application/atom+xml, application/xml, text/xml',
+      },
+      signal: controller.signal,
+    });
+    clearTimeout(timer);
+    if (!res.ok) {
+      console.log(`[hollow/router] Reddit Atom ${res.status} for r/${subreddit}`);
+      return null;
+    }
+    const xml = await res.text();
+    // Parse Atom <entry> elements with regex (no DOM available)
+    const entries: RedditAtomEntry[] = [];
+    const entryRe = /<entry>([\s\S]*?)<\/entry>/g;
+    let match: RegExpExecArray | null;
+    while ((match = entryRe.exec(xml)) !== null) {
+      const block = match[1];
+      const titleM = block.match(/<title[^>]*>([\s\S]*?)<\/title>/);
+      const hrefM  = block.match(/href="(https:\/\/www\.reddit\.com\/r\/[^"]+)"/);
+      const authorM = block.match(/<name>(\/u\/[^<]+)<\/name>/);
+      if (titleM && hrefM) {
+        entries.push({
+          title:  titleM[1].replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'"),
+          href:   hrefM[1],
+          author: authorM ? authorM[1] : 'unknown',
+        });
+      }
+    }
+    console.log(`[hollow/router] Reddit Atom OK — ${entries.length} entries for r/${subreddit}`);
+    return entries.length > 0 ? { type: 'atom', subreddit, entries } : null;
+  } catch (err) {
+    clearTimeout(timer);
+    console.log(`[hollow/router] Reddit Atom failed: ${err instanceof Error ? err.message : err}`);
+    return null;
+  }
+}
+
+async function redditExecute(url: string): Promise<unknown> {
+  let subreddit = 'popular';
+  let apiPath = '/r/popular/hot.json';
+  try {
+    const parts = new URL(url).pathname.split('/').filter(Boolean);
+    if (parts[0] === 'r' && parts[1]) {
+      subreddit = parts[1];
+      apiPath = `/r/${parts[1]}/hot.json`;
+    }
+  } catch { /* use defaults */ }
+
+  const jsonUrl = `https://www.reddit.com${apiPath}?limit=25`;
+
+  // Attempt 1 — JSON API, browser UA
+  const json1 = await redditFetchJson(jsonUrl, REDDIT_BROWSER_UA);
+  if (json1) { console.log('[hollow/router] Reddit execute: JSON/browser-UA OK'); return json1; }
+
+  // Attempt 2 — JSON API, Reddit mobile UA
+  const json2 = await redditFetchJson(jsonUrl, REDDIT_MOBILE_UA);
+  if (json2) { console.log('[hollow/router] Reddit execute: JSON/mobile-UA OK'); return json2; }
+
+  // Attempt 3 — Atom feed (no scores, but titles + links)
+  const atom = await redditFetchAtom(subreddit);
+  if (atom) return atom;
+
+  // All methods blocked — return sentinel for the redirect stub
+  console.log(`[hollow/router] Reddit execute: all methods blocked — returning blocked sentinel`);
+  const blocked: RedditBlockedResult = { type: 'blocked', subreddit };
+  return blocked;
+}
+
 function redditFormat(data: unknown, _url: string): string {
+  const d = data as ({ type?: string });
+
+  // Atom feed result (no scores)
+  if (d && d.type === 'atom') {
+    const atom = data as RedditAtomResult;
+    let map = `[MOBILE API: reddit.com]\n`;
+    map += `[Subreddit: r/${atom.subreddit}]\n`;
+    map += `[Source: Reddit Atom feed — titles and links only, no scores]\n\n`;
+    map += `[Posts:]\n`;
+    atom.entries.slice(0, 15).forEach((e, i) => {
+      map += `  [${i + 1}] "${e.title}"\n`;
+      map += `      author:${e.author}  permalink: ${e.href}\n`;
+    });
+    if (atom.entries.length === 0) map += `  (no posts in feed)\n`;
+    return map.trimEnd();
+  }
+
+  // Blocked sentinel — tell the agent to pivot to Startpage search
+  if (d && d.type === 'blocked') {
+    const b = data as RedditBlockedResult;
+    return [
+      `[MOBILE API: reddit.com]`,
+      `[Subreddit: r/${b.subreddit}]`,
+      `[Status: Reddit API and HTML blocked from server IPs]`,
+      `[Action: Search for Reddit content via Startpage instead]`,
+      `[Search query: site:reddit.com r/${b.subreddit} hot posts]`,
+      `[Navigate to https://www.startpage.com/ and search for the above query]`,
+    ].join('\n');
+  }
+
+  // JSON API result (full data with scores)
   const listing = data as RedditListing;
   const posts = listing?.data?.children ?? [];
   const subreddit = posts[0]?.data?.subreddit ?? 'popular';
@@ -118,10 +208,7 @@ function redditFormat(data: unknown, _url: string): string {
     map += `      permalink: reddit.com${p.permalink}\n`;
   });
 
-  if (posts.length === 0) {
-    map += `  (no posts returned — subreddit may be private or empty)\n`;
-  }
-
+  if (posts.length === 0) map += `  (no posts returned — subreddit may be private or empty)\n`;
   return map.trimEnd();
 }
 
