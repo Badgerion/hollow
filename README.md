@@ -94,6 +94,8 @@ Coverage is ~90–95% of agent tasks. The remaining 5–10% — hardware-verifie
 
 **[hollow-tan-omega.vercel.app/mirror](https://hollow-tan-omega.vercel.app/mirror)**
 
+![Matrix Mirror — Ghost DOM view showing Startpage rendered in the Mirror iframe, with TEXT tier, 0.95 confidence, and session ID in the top bar](https://raw.githubusercontent.com/Badgerion/hollow/main/assets/mirror-ghost-dom.png)
+
 ![Matrix Mirror — Hacker News loaded with TEXT tier, numbered element badges, 0.95 confidence, and live SSE pipeline log](https://raw.githubusercontent.com/Badgerion/hollow/main/assets/mirror-screenshot.png)
 
 The Matrix Mirror is the observability UI. Type any URL, watch it load, see every element tagged and addressable. The agent log shows every routing decision, confidence score, and action in real time.
