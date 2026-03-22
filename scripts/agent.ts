@@ -9,6 +9,7 @@
  *
  * Usage:
  *   npx tsx scripts/agent.ts --task "What is the top story on Hacker News?"
+ *   npx tsx scripts/agent.ts --benchmark
  *
  * Environment:
  *   ANTHROPIC_API_KEY   required
@@ -24,7 +25,6 @@ const MAX_TABS = 5;
 const MODEL = 'claude-sonnet-4-20250514';
 // Truncate GDG maps in conversation history to keep token count under 30k TPM.
 // Full map is shown for the most recent step; older steps get a trimmed version.
-// Truncate GDG maps in older messages to ~40 lines
 const GDG_MAX_LINES = 40;
 // Sliding window — only send the last N messages to Claude per step.
 // The MEMORY section in each assistant turn recaps context, so old messages
@@ -56,6 +56,34 @@ interface Action {
 interface Message {
   role: 'user' | 'assistant';
   content: string;
+}
+
+interface ClaudeResponse {
+  text: string;
+  inputTokens: number;
+  outputTokens: number;
+}
+
+interface TaskResult {
+  taskNum: number;
+  description: string;
+  expectedTier: string;
+  steps: number;
+  tiersUsed: string[];
+  confidences: number[];
+  finalAnswer: string;
+  passed: boolean;
+  timedOut: boolean;
+  error?: string;
+  inputTokens: number;
+  outputTokens: number;
+}
+
+interface BenchmarkTask {
+  num: number;
+  description: string;
+  task: string;
+  expectedTier: string;
 }
 
 // ─── Session Manager ──────────────────────────────────────────────────────────
@@ -116,18 +144,36 @@ class SessionManager {
       )
       .join('\n');
   }
+
+  /** Collect all unique tiers and confidence scores seen so far. */
+  metrics(): { tiers: string[]; confidences: number[] } {
+    const tiers: string[] = [];
+    const confidences: number[] = [];
+    for (const entry of this.sessions.values()) {
+      if (!tiers.includes(entry.tier)) tiers.push(entry.tier);
+      confidences.push(entry.confidence);
+    }
+    return { tiers, confidences };
+  }
 }
 
 // ─── CLI ─────────────────────────────────────────────────────────────────────
 
-function parseArgs(): string {
+interface CliArgs {
+  mode: 'task' | 'benchmark';
+  task?: string;
+}
+
+function parseArgs(): CliArgs {
   const args = process.argv.slice(2);
+  if (args.includes('--benchmark')) return { mode: 'benchmark' };
   const i = args.indexOf('--task');
   if (i === -1 || !args[i + 1]) {
     console.error('Usage: npx tsx scripts/agent.ts --task "<task>"');
+    console.error('       npx tsx scripts/agent.ts --benchmark');
     process.exit(1);
   }
-  return args[i + 1];
+  return { mode: 'task', task: args[i + 1] };
 }
 
 // ─── Hollow API ───────────────────────────────────────────────────────────────
@@ -208,7 +254,7 @@ Rules:
 - Use new_tab when researching multiple sources simultaneously — open all sources, then switch between them.`;
 }
 
-async function callClaude(messages: Message[], sessionManager: SessionManager): Promise<string> {
+async function callClaude(messages: Message[], sessionManager: SessionManager): Promise<ClaudeResponse> {
   if (!ANTHROPIC_API_KEY) throw new Error('ANTHROPIC_API_KEY is not set');
 
   // Sliding window — keep the initial task message + last MAX_HISTORY_MESSAGES.
@@ -234,8 +280,15 @@ async function callClaude(messages: Message[], sessionManager: SessionManager): 
     }),
   });
   if (!res.ok) throw new Error(`Anthropic API ${res.status}: ${await res.text()}`);
-  const data = await res.json() as { content: { type: string; text: string }[] };
-  return data.content.find(b => b.type === 'text')?.text ?? '';
+  const data = await res.json() as {
+    content: { type: string; text: string }[];
+    usage: { input_tokens: number; output_tokens: number };
+  };
+  return {
+    text: data.content.find(b => b.type === 'text')?.text ?? '',
+    inputTokens: data.usage?.input_tokens ?? 0,
+    outputTokens: data.usage?.output_tokens ?? 0,
+  };
 }
 
 // ─── GDG truncation — keeps token count under 30k TPM ────────────────────────
@@ -287,24 +340,30 @@ function printStep(step: number, reasoning: string, action: Action, sessionManag
   console.log(`\n  → ${JSON.stringify(action)}`);
 }
 
-// ─── Main loop ────────────────────────────────────────────────────────────────
+// ─── Core agent loop ──────────────────────────────────────────────────────────
 
-async function main() {
-  const task = parseArgs();
+async function runTask(
+  task: string,
+  taskNum: number,
+  description: string,
+  expectedTier: string,
+): Promise<TaskResult> {
   const sessionManager = new SessionManager();
-
-  console.log(`\n${HR}`);
-  console.log('  Hollow Agent — ContextAwarePlanningAgent');
-  console.log(HR);
-  console.log(`  Task : ${task}`);
-  console.log(`  Host : ${HOLLOW_URL}`);
-  console.log(`  Model: ${MODEL}`);
-  console.log('');
-
   const messages: Message[] = [];
   let currentSessionId: string | undefined;
   let gdgMap = '';
   let stepCount = 0;
+  let totalInputTokens = 0;
+  let totalOutputTokens = 0;
+
+  // Per-step tier/confidence tracking (includes navigate + new_tab results)
+  const tiersSeenSet = new Set<string>();
+  const confidencesSeen: number[] = [];
+
+  function recordPercept(result: PerceiveResult) {
+    tiersSeenSet.add(result.tier);
+    confidencesSeen.push(result.confidence);
+  }
 
   messages.push({
     role: 'user',
@@ -314,20 +373,42 @@ async function main() {
   for (let step = 1; step <= MAX_STEPS; step++) {
     stepCount = step;
 
-    const reasoning = await callClaude(messages, sessionManager);
-    const action = parseAction(reasoning);
+    const claude = await callClaude(messages, sessionManager);
+    totalInputTokens  += claude.inputTokens;
+    totalOutputTokens += claude.outputTokens;
 
-    printStep(step, reasoning, action, sessionManager);
-    messages.push({ role: 'assistant', content: reasoning });
+    const action = parseAction(claude.text);
+    printStep(step, claude.text, action, sessionManager);
+    messages.push({ role: 'assistant', content: claude.text });
 
-    // ── Execute the action ────────────────────────────────────────────────────
+    // ── Execute the action ──────────────────────────────────────────────────
     if (action.type === 'done') {
+      const { tiers, confidences } = sessionManager.metrics();
+      // Merge with any tiers captured from navigate results not yet in sessionManager
+      for (const t of tiersSeenSet) if (!tiers.includes(t)) tiers.push(t);
+      for (const c of confidencesSeen) if (!confidences.includes(c)) confidences.push(c);
+
+      const answer = action.result ?? '';
       console.log(`\n${HR}`);
       console.log('  RESULT');
       console.log(HR);
-      console.log(`\n  ${action.result ?? '(no result provided)'}`);
-      console.log(`\n  Completed in ${stepCount} step${stepCount !== 1 ? 's' : ''}.\n`);
-      return;
+      console.log(`\n  ${answer}`);
+      console.log(`\n  Completed in ${stepCount} step${stepCount !== 1 ? 's' : ''}.`);
+      console.log(`  Tokens: ${totalInputTokens} in / ${totalOutputTokens} out\n`);
+
+      return {
+        taskNum,
+        description,
+        expectedTier,
+        steps: stepCount,
+        tiersUsed: tiers,
+        confidences,
+        finalAnswer: answer,
+        passed: answer.trim().length > 0,
+        timedOut: false,
+        inputTokens: totalInputTokens,
+        outputTokens: totalOutputTokens,
+      };
     }
 
     let newMap: string | undefined;
@@ -337,6 +418,9 @@ async function main() {
       const label = action.label ?? new URL(action.url).hostname.replace(/^www\./, '');
       process.stdout.write(`\n  Opening tab [${label}] ${action.url} … `);
       const newId = await sessionManager.open(action.url, label, action.stateId);
+      // Capture tier/confidence from the newly opened tab entry
+      const entry = sessionManager.sessions.get(newId);
+      if (entry) { tiersSeenSet.add(entry.tier); confidencesSeen.push(entry.confidence); }
       currentSessionId = newId;
       gdgMap = sessionManager.switch(newId);
       newMap = gdgMap;
@@ -370,10 +454,10 @@ async function main() {
       if (!action.url) throw new Error('navigate action missing url');
       process.stdout.write(`\n  Perceiving ${action.url} … `);
       const result = await perceiveUrl({ url: action.url, sessionId: currentSessionId });
+      recordPercept(result);
       currentSessionId = result.sessionId;
       newMap = result.gdgMap;
       gdgMap = newMap;
-      // Register in session manager under a derived label if not already there
       if (!sessionManager.sessions.has(currentSessionId)) {
         const label = new URL(action.url).hostname.replace(/^www\./, '');
         sessionManager.sessions.set(currentSessionId, {
@@ -405,8 +489,7 @@ async function main() {
       console.log('done');
     }
 
-    // Truncate GDG in all prior user messages to keep token count manageable,
-    // then append the current page state at full fidelity.
+    // Truncate GDG in all prior user messages to keep token count manageable
     for (const msg of messages) {
       if (msg.role === 'user' && msg.content.startsWith('Action executed.')) {
         const marker = '\n\n';
@@ -431,6 +514,257 @@ async function main() {
   for (const line of gdgMap.split('\n').slice(0, 20)) console.log(`  ${line}`);
   if (gdgMap.split('\n').length > 20) console.log('  …');
   console.log('');
+
+  const { tiers, confidences } = sessionManager.metrics();
+  for (const t of tiersSeenSet) if (!tiers.includes(t)) tiers.push(t);
+  for (const c of confidencesSeen) if (!confidences.includes(c)) confidences.push(c);
+
+  return {
+    taskNum,
+    description,
+    expectedTier,
+    steps: stepCount,
+    tiersUsed: tiers,
+    confidences,
+    finalAnswer: '',
+    passed: false,
+    timedOut: true,
+    inputTokens: totalInputTokens,
+    outputTokens: totalOutputTokens,
+  };
+}
+
+// ─── Benchmark ────────────────────────────────────────────────────────────────
+
+const BENCHMARK_TASKS: BenchmarkTask[] = [
+  {
+    num: 1,
+    description: 'TEXT tier, single page read',
+    task: 'What are the top 5 stories on Hacker News right now? List title and comment count.',
+    expectedTier: 'text',
+  },
+  {
+    num: 2,
+    description: 'TEXT tier, navigation',
+    task: 'Go to the first story on Hacker News and tell me the domain it links to.',
+    expectedTier: 'text',
+  },
+  {
+    num: 3,
+    description: 'HOLLOW tier, simple site',
+    task: 'What is the main headline on example.com?',
+    expectedTier: 'high/medium/low',
+  },
+  {
+    num: 4,
+    description: 'MOBILE tier, Reddit',
+    task: 'What is the top post on r/programming today and how many upvotes does it have?',
+    expectedTier: 'mobile-api',
+  },
+  {
+    num: 5,
+    description: 'MOBILE tier, Reddit navigation',
+    task: "Find a post about Python on r/programming and summarise what it's about.",
+    expectedTier: 'mobile-api',
+  },
+  {
+    num: 6,
+    description: 'CACHE tier, news site',
+    task: 'What is the lead story on arstechnica.com right now?',
+    expectedTier: 'cache',
+  },
+  {
+    num: 7,
+    description: 'HOLLOW tier, search',
+    task: "Search for 'serverless browser' on Startpage and list the first 3 results.",
+    expectedTier: 'text',
+  },
+  {
+    num: 8,
+    description: 'Multi-step, multi-tier (TEXT → TEXT)',
+    task: 'Find the most recent post about AI on Hacker News, then search for the company or project mentioned in the title on Startpage and tell me what it does.',
+    expectedTier: 'text → text',
+  },
+  {
+    num: 9,
+    description: 'Multi-tab comparison (TEXT + MOBILE)',
+    task: 'Open Hacker News and Reddit r/technology simultaneously and tell me which has more AI stories on the front page today.',
+    expectedTier: 'text + mobile-api',
+  },
+  {
+    num: 10,
+    description: 'Deep read, multi-step',
+    task: 'Find a Show HN post from today on Hacker News and summarise both the project and the top 3 comments.',
+    expectedTier: 'text',
+  },
+];
+
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function pad(s: string, n: number): string {
+  return s.length >= n ? s.slice(0, n) : s + ' '.repeat(n - s.length);
+}
+
+async function runBenchmark() {
+  const mirrorUrl = `${HOLLOW_URL}/mirror`;
+
+  console.log(`\n${'═'.repeat(72)}`);
+  console.log('  Hollow Agent — Structured Benchmark');
+  console.log(`${'═'.repeat(72)}`);
+  console.log(`  Host   : ${HOLLOW_URL}`);
+  console.log(`  Model  : ${MODEL}`);
+  console.log(`  Tasks  : ${BENCHMARK_TASKS.length}`);
+  console.log(`  Mirror : ${mirrorUrl}`);
+  console.log(`${'═'.repeat(72)}\n`);
+  console.log('  Open the Mirror URL above to observe sessions live.');
+  console.log('  Starting in 3 seconds…\n');
+  await sleep(3000);
+
+  const results: TaskResult[] = [];
+
+  for (const bt of BENCHMARK_TASKS) {
+    console.log(`\n${'═'.repeat(72)}`);
+    console.log(`  BENCHMARK TASK ${bt.num} / ${BENCHMARK_TASKS.length} — ${bt.description}`);
+    console.log(`  Expected tier: ${bt.expectedTier}`);
+    console.log(`${'═'.repeat(72)}`);
+    console.log(`  Task: ${bt.task}`);
+    console.log(`  Mirror: ${mirrorUrl}\n`);
+
+    let result: TaskResult;
+    try {
+      result = await runTask(bt.task, bt.num, bt.description, bt.expectedTier);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`\n  ✗ Task ${bt.num} threw: ${msg}\n`);
+      result = {
+        taskNum: bt.num,
+        description: bt.description,
+        expectedTier: bt.expectedTier,
+        steps: 0,
+        tiersUsed: [],
+        confidences: [],
+        finalAnswer: '',
+        passed: false,
+        timedOut: false,
+        error: msg,
+        inputTokens: 0,
+        outputTokens: 0,
+      };
+    }
+
+    results.push(result);
+
+    // Brief pause between tasks to avoid rate limits
+    if (bt.num < BENCHMARK_TASKS.length) {
+      console.log('  Pausing 5 s before next task…');
+      await sleep(5000);
+    }
+  }
+
+  // ── Summary table ─────────────────────────────────────────────────────────
+  console.log(`\n${'═'.repeat(72)}`);
+  console.log('  BENCHMARK SUMMARY');
+  console.log(`${'═'.repeat(72)}\n`);
+
+  const COL = { task: 4, desc: 26, steps: 5, tier: 18, conf: 6, tokens: 10, result: 6 };
+
+  const header = [
+    pad('Task', COL.task),
+    pad('Description', COL.desc),
+    pad('Steps', COL.steps),
+    pad('Tier(s)', COL.tier),
+    pad('Conf', COL.conf),
+    pad('Tokens', COL.tokens),
+    pad('Result', COL.result),
+  ].join(' │ ');
+  console.log('  ' + header);
+  console.log('  ' + '─'.repeat(header.length));
+
+  let totalPass = 0;
+  let totalTokensIn = 0;
+  let totalTokensOut = 0;
+
+  for (const r of results) {
+    const status = r.error
+      ? '✗ ERR'
+      : r.timedOut
+        ? '✗ TIMEOUT'
+        : r.passed
+          ? '✓ PASS'
+          : '✗ FAIL';
+
+    const tier = r.tiersUsed.join('+') || '—';
+    const avgConf = r.confidences.length
+      ? (r.confidences.reduce((a, b) => a + b, 0) / r.confidences.length).toFixed(2)
+      : '—';
+    const tokens = `${r.inputTokens}/${r.outputTokens}`;
+
+    const row = [
+      pad(String(r.taskNum), COL.task),
+      pad(r.description, COL.desc),
+      pad(String(r.steps), COL.steps),
+      pad(tier, COL.tier),
+      pad(avgConf, COL.conf),
+      pad(tokens, COL.tokens),
+      pad(status, COL.result),
+    ].join(' │ ');
+    console.log('  ' + row);
+
+    if (r.passed) totalPass++;
+    totalTokensIn  += r.inputTokens;
+    totalTokensOut += r.outputTokens;
+  }
+
+  console.log('  ' + '─'.repeat(header.length));
+  console.log(`\n  Passed : ${totalPass} / ${BENCHMARK_TASKS.length}`);
+  console.log(`  Failed : ${BENCHMARK_TASKS.length - totalPass} / ${BENCHMARK_TASKS.length}`);
+  console.log(`  Tokens : ${totalTokensIn} in / ${totalTokensOut} out (${totalTokensIn + totalTokensOut} total)`);
+  console.log(`  Mirror : ${mirrorUrl}\n`);
+
+  // Detailed per-task answers
+  console.log(`${'═'.repeat(72)}`);
+  console.log('  TASK ANSWERS');
+  console.log(`${'═'.repeat(72)}\n`);
+  for (const r of results) {
+    console.log(`  [Task ${r.taskNum}] ${r.description}`);
+    if (r.error) {
+      console.log(`    ERROR: ${r.error}`);
+    } else if (r.timedOut) {
+      console.log('    TIMED OUT — hit max steps without completing.');
+    } else {
+      const answer = r.finalAnswer.replace(/\n/g, '\n    ');
+      console.log(`    ${answer}`);
+    }
+    console.log('');
+  }
+}
+
+// ─── Main ─────────────────────────────────────────────────────────────────────
+
+async function main() {
+  const cli = parseArgs();
+
+  if (cli.mode === 'benchmark') {
+    await runBenchmark();
+    return;
+  }
+
+  // Single task mode
+  const task = cli.task!;
+  const mirrorUrl = `${HOLLOW_URL}/mirror`;
+
+  console.log(`\n${HR}`);
+  console.log('  Hollow Agent — ContextAwarePlanningAgent');
+  console.log(HR);
+  console.log(`  Task  : ${task}`);
+  console.log(`  Host  : ${HOLLOW_URL}`);
+  console.log(`  Model : ${MODEL}`);
+  console.log(`  Mirror: ${mirrorUrl}`);
+  console.log('');
+
+  await runTask(task, 0, 'single task', '—');
 }
 
 main().catch(err => {
