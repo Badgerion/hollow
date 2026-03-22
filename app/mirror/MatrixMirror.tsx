@@ -640,6 +640,28 @@ function StartScreen() {
           URL (https://…) or raw HTML accepted · Enter to submit
         </div>
       )}
+
+      {/* Public demo notice */}
+      <div style={{
+        marginTop: 28,
+        fontSize: 10,
+        color: '#2a2a2a',
+        textAlign: 'center' as const,
+        lineHeight: 1.7,
+        letterSpacing: '0.03em',
+      }}>
+        Public demo — 10 req/min per IP.{' '}
+        For production use,{' '}
+        <a
+          href="https://github.com/Badgerion/hollow"
+          target="_blank"
+          rel="noopener noreferrer"
+          style={{ color: '#3a3a3a', textDecoration: 'underline' }}
+        >
+          deploy your own instance
+        </a>
+        .
+      </div>
     </div>
   );
 }

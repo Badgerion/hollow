@@ -15,6 +15,7 @@
   },
   "dependencies": {
     "@types/qrcode": "^1.5.6",
+    "@upstash/ratelimit": "^2.0.8",
     "@upstash/redis": "^1.37.0",
     "got-scraping": "^4.0.4",
     "happy-dom": "^14.12.0",
