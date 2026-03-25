@@ -7,6 +7,7 @@
 
 import { Window } from 'happy-dom';
 import { createVitalityMonitor, type VitalityMonitor } from './vitality';
+import { applyGPUPresenceLayer } from './gpu-presence';
 
 export interface DOMResult {
   window: Window;
@@ -134,6 +135,15 @@ export async function buildDOM(html: string, url: string): Promise<DOMResult> {
       onCommitFiberUnmount()   {},
       onPostCommitFiberRoot()  {},
     };
+  }
+
+  // GPU presence layer — must run BEFORE document.write so that page scripts
+  // executing during HTML parsing never see the unpatched APIs.
+  try {
+    const hostname = new URL(url).hostname;
+    applyGPUPresenceLayer(window, { hostname });
+  } catch {
+    // Malformed URL — skip GPU patching gracefully
   }
 
   // Write the HTML into the document
