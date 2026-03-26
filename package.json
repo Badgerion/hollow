@@ -11,12 +11,14 @@
     "start": "next start",
     "lint": "next lint",
     "test:perceive": "tsx scripts/test-perceive.ts",
-    "agent": "tsx scripts/agent.ts"
+    "agent": "tsx scripts/agent.ts",
+    "calibrate": "tsx scripts/calibrate.ts"
   },
   "dependencies": {
     "@types/qrcode": "^1.5.6",
     "@upstash/ratelimit": "^2.0.8",
     "@upstash/redis": "^1.37.0",
+    "chrome-remote-interface": "^0.34.0",
     "got-scraping": "^4.0.4",
     "happy-dom": "^14.12.0",
     "ioredis": "^5.10.1",
@@ -28,6 +30,7 @@
     "yoga-layout-prebuilt": "^1.10.0"
   },
   "devDependencies": {
+    "@types/chrome-remote-interface": "^0.33.0",
     "@types/node": "^20.0.0",
     "@types/react": "^18.3.0",
     "@types/react-dom": "^18.3.0",
