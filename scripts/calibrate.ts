@@ -25,20 +25,24 @@ import { resolveGridLayout } from '../lib/hollow/grid-resolver';
 import { generateGDGSpatial } from '../lib/hollow/gdg-spatial';
 import type { LayoutBox } from '../lib/hollow/yoga-layout';
 import type { ElementLayout } from '../lib/hollow/types';
+import { spawn } from 'node:child_process';
+import path from 'node:path';
+
+// ─── Subprocess worker mode — see entry point at bottom of file ───────────────
 
 // ─── Test URLs ────────────────────────────────────────────────────────────────
 
 const TEST_URLS = [
-  'https://news.ycombinator.com',       // table layout
-  'https://example.com',                // simple block
-  'https://github.com/trending',        // flex layout
-  'https://developer.mozilla.org',      // grid layout
-  'https://tailwindcss.com',            // CSS-heavy
-  'https://react.dev',                  // React SPA
-  'https://vercel.com',                 // Next.js
-  'https://stripe.com/docs',            // docs layout
-  'https://en.wikipedia.org/wiki/Main_Page', // complex
-  'https://www.startpage.com',          // known-good baseline
+  'https://news.ycombinator.com',                // table layout
+  'https://text.npr.org',                        // block / simple HTML
+  'https://github.com/trending',                 // flex layout
+  'https://developer.mozilla.org/en-US/docs/Web/CSS/display', // grid layout (single page)
+  'https://lite.cnn.com',                        // block, minimal JS
+  'https://learnxinyminutes.com',                // block, static docs
+  'https://golang.org',                          // flex, small page
+  'https://stripe.com/docs/api',                 // docs / left-nav layout
+  'https://en.wikipedia.org/wiki/Cascading_Style_Sheets', // wiki article
+  'https://info.cern.ch',                        // baseline: original web page
 ];
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -144,12 +148,15 @@ async function runHollowPipeline(url: string): Promise<HollowElement[]> {
   const gdg = generateGDGSpatial(body, window, layoutMap, gridLayouts, gridMeta, gridColCounts);
   window.happyDOM.close();
 
-  // Flatten all elements (actionable and non-actionable containers) from the tree
+  // Flatten the full element tree — actionable elements AND non-actionable
+  // containers that carry visible text.  Use gdg.roots so we see everything.
   const elements: HollowElement[] = [];
 
   function flattenTree(el: ElementLayout): void {
     const text = (el.text ?? '').trim();
-    if (text && el.width > 0 && el.height > 0) {
+    // Include elements with text + non-zero width.
+    // Height can be 0 when Yoga lacks font metrics — still useful for x/y calibration.
+    if (text && el.width > 0) {
       elements.push({
         tag: el.tag,
         text: text.slice(0, 120),
@@ -162,25 +169,47 @@ async function runHollowPipeline(url: string): Promise<HollowElement[]> {
     for (const child of el.children) flattenTree(child);
   }
 
-  // Access the internal element tree through the elements map
-  // The GDG map only stores actionable items, so reconstruct from gdg.elements
-  for (const [, el] of gdg.elements) {
-    const text = (el.text ?? '').trim();
-    if (text && el.width > 0 && el.height > 0) {
-      elements.push({
-        tag: el.tag,
-        text: text.slice(0, 120),
-        x: el.x,
-        y: el.y,
-        width: el.width,
-        height: el.height,
-      });
-    }
-    // Walk children too (non-actionable containers that have text)
-    for (const child of el.children) flattenTree(child);
-  }
-
+  for (const root of gdg.roots) flattenTree(root);
   return elements;
+}
+
+// ─── Crash-safe Hollow runner ─────────────────────────────────────────────────
+//
+// Spawns the pipeline in a fresh subprocess.  If the process crashes (e.g.
+// HappyDOM's deferred callbacks throw into nbind.js), the subprocess dies
+// cleanly and we return empty rather than crashing the orchestrator.
+
+const TSX_BIN = path.join(process.cwd(), 'node_modules', '.bin', 'tsx');
+const SCRIPT   = path.join(process.cwd(), 'scripts', 'calibrate.ts');
+
+function spawnHollowWorker(url: string, timeoutMs = 45_000): Promise<HollowElement[]> {
+  return new Promise(resolve => {
+    const proc = spawn(TSX_BIN, [SCRIPT, '--hollow-worker', url], {
+      cwd: process.cwd(),
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+
+    let stdout = '';
+    proc.stdout.on('data', (d: Buffer) => { stdout += d.toString(); });
+
+    const timer = setTimeout(() => {
+      proc.kill('SIGKILL');
+      resolve([]);
+    }, timeoutMs);
+
+    proc.on('close', (code) => {
+      clearTimeout(timer);
+      if (code === 0) {
+        // The Hollow pipeline writes debug logs to stdout too, so grab
+        // only the final line which is our JSON payload.
+        const lastLine = stdout.trimEnd().split('\n').pop() ?? '';
+        try { resolve(JSON.parse(lastLine)); return; } catch { /* fall through */ }
+      }
+      resolve([]);
+    });
+
+    proc.on('error', () => { clearTimeout(timer); resolve([]); });
+  });
 }
 
 // ─── Chrome DevTools extraction ───────────────────────────────────────────────
@@ -199,9 +228,12 @@ async function runChromeExtraction(url: string): Promise<ChromeElement[]> {
     await Page.enable();
     await DOM.enable();
 
-    // Navigate and wait for load
+    // Navigate and wait for load — cap at 15s so we never hang forever
     await Page.navigate({ url });
-    await Page.loadEventFired().catch(() => { /* headless doesn't always fire */ });
+    await Promise.race([
+      Page.loadEventFired(),
+      new Promise(r => setTimeout(r, 15_000)),
+    ]).catch(() => { /* timeout or no load event — proceed anyway */ });
 
     // Extra settle time for SPAs / lazy content
     await new Promise(r => setTimeout(r, 1500));
@@ -474,7 +506,7 @@ async function calibrateUrl(url: string): Promise<UrlResult> {
   let chromeElements: ChromeElement[] = [];
 
   const [hollowResult, chromeResult] = await Promise.allSettled([
-    runHollowPipeline(url),
+    spawnHollowWorker(url),
     runChromeExtraction(url),
   ]);
 
@@ -724,7 +756,24 @@ async function main() {
   console.log('');
 }
 
-main().catch(err => {
-  console.error('\n✗ Calibration failed:', err);
-  process.exit(1);
-});
+// ─── Entry point ─────────────────────────────────────────────────────────────
+//
+// Worker mode: tsx calibrate.ts --hollow-worker <url>
+//   Runs only runHollowPipeline(url), writes JSON to stdout, exits.
+//   Crash-isolated — the parent process spawns this per URL.
+//
+// Normal mode: tsx calibrate.ts
+//   Runs the full calibration against all TEST_URLS.
+
+if (process.argv.includes('--hollow-worker')) {
+  const workerUrl = process.argv[process.argv.indexOf('--hollow-worker') + 1];
+  if (!workerUrl) { process.stderr.write('No URL given to --hollow-worker\n'); process.exit(1); }
+  runHollowPipeline(workerUrl)
+    .then(elements => { process.stdout.write(JSON.stringify(elements)); process.exit(0); })
+    .catch(err => { process.stderr.write(String(err instanceof Error ? err.message : err) + '\n'); process.exit(2); });
+} else {
+  main().catch(err => {
+    console.error('\n✗ Calibration failed:', err);
+    process.exit(1);
+  });
+}

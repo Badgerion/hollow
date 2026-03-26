@@ -246,6 +246,8 @@ function hasFixedOrStickyHeader(body: Element, win: Window): boolean {
 export interface GDGSpatialOutput {
   map: string;
   elements: Map<number, ElementLayout>;
+  /** Full tree from body's direct children — includes non-actionable containers. */
+  roots: ElementLayout[];
   actionableCount: number;
   tokenEstimate: number;
   hasFixedHeader: boolean;
@@ -298,5 +300,5 @@ export function generateGDGSpatial(
   // Rough token estimate: ~1 token per 4 chars
   const tokenEstimate = Math.ceil(map.length / 4);
 
-  return { map, elements, actionableCount: elements.size, tokenEstimate, hasFixedHeader };
+  return { map, elements, roots, actionableCount: elements.size, tokenEstimate, hasFixedHeader };
 }
