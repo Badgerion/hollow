@@ -204,6 +204,43 @@ function renderTree(el: ElementLayout, indent: string, lines: string[]): void {
   }
 }
 
+// ─── Fixed/sticky header detection ───────────────────────────────────────────
+//
+// Hollow computes coordinates relative to document top (y=0 at the very
+// beginning of the document).  Chrome's getBoundingClientRect() returns
+// coordinates relative to the *viewport* top — so if the page is scrolled,
+// or if there is a fixed/sticky header occupying the top of the viewport,
+// the two coordinate systems diverge by exactly that offset.
+//
+// We can't correct for this without knowing the actual scroll position at
+// the time Chrome measured, so instead we detect the condition and annotate
+// the GDG map so downstream consumers know which coordinate system is in use.
+
+function hasFixedOrStickyHeader(body: Element, win: Window): boolean {
+  const MAX_DEPTH = 2; // check body children and grandchildren
+
+  function check(el: Element, depth: number): boolean {
+    const styles = resolveStyles(el, win);
+    const pos = styles.position;
+    if (pos === 'fixed' || pos === 'sticky') {
+      // Only flag if the element is near the top of the viewport
+      const top = parseFloat(styles.top);
+      if (isNaN(top) || top <= 10) return true;
+    }
+    if (depth < MAX_DEPTH) {
+      for (const child of Array.from(el.children)) {
+        if (check(child, depth + 1)) return true;
+      }
+    }
+    return false;
+  }
+
+  for (const child of Array.from(body.children)) {
+    if (check(child, 0)) return true;
+  }
+  return false;
+}
+
 // ─── Main entry point ─────────────────────────────────────────────────────────
 
 export interface GDGSpatialOutput {
@@ -211,6 +248,7 @@ export interface GDGSpatialOutput {
   elements: Map<number, ElementLayout>;
   actionableCount: number;
   tokenEstimate: number;
+  hasFixedHeader: boolean;
 }
 
 export function generateGDGSpatial(
@@ -239,8 +277,17 @@ export function generateGDGSpatial(
   }
   for (const root of roots) collect(root);
 
+  // Detect fixed/sticky header before rendering so we can annotate the map
+  const hasFixedHeader = hasFixedOrStickyHeader(body, win);
+
   // Render the text tree
-  const lines: string[] = [`[Viewport: ${VIEWPORT_WIDTH}x${VIEWPORT_HEIGHT}]`, ''];
+  const lines: string[] = [`[Viewport: ${VIEWPORT_WIDTH}x${VIEWPORT_HEIGHT}]`];
+
+  if (hasFixedHeader) {
+    lines.push('[Note: coordinates relative to document top. Subtract scroll offset for viewport-relative positions.]');
+  }
+
+  lines.push('');
 
   for (const root of roots) {
     renderTree(root, '', lines);
@@ -251,5 +298,5 @@ export function generateGDGSpatial(
   // Rough token estimate: ~1 token per 4 chars
   const tokenEstimate = Math.ceil(map.length / 4);
 
-  return { map, elements, actionableCount: elements.size, tokenEstimate };
+  return { map, elements, actionableCount: elements.size, tokenEstimate, hasFixedHeader };
 }
