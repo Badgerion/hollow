@@ -18,7 +18,8 @@ import { v4 as uuidv4 } from 'uuid';
 import { join } from 'path';
 import { Worker, isMainThread } from 'worker_threads';
 import { fetchUrl, NetworkFetchError } from './network';
-import { tryMobileAPIBypass, tryCacheBypass, isReadOnlyUrl, shouldTryCacheFirst, isConsentWall } from './router';
+import { tryMobileAPIBypass, tryCacheBypass, isReadOnlyUrl, shouldTryCacheFirst, isConsentWall, isFastRouteCandidate, fetchFastRoute } from './router';
+import type { FastRouteRaw } from './router';
 import { buildDOM } from './dom';
 import { resolveStyles } from './css-resolver';
 import { calculateLayout, calculateSubtreeLayout } from './yoga-layout';
@@ -29,7 +30,7 @@ import { scoreConfidence } from './confidence';
 import { loadSession, saveSession, newSession, bumpSession } from './session';
 import { getStateProvider } from './state-provider';
 import { getEmitter } from './sse-emitter';
-import type { HollowPerceiveResult, PerceiveRequest, SessionState } from './types';
+import type { HollowPerceiveResult, PerceiveRequest, SessionState, PipelineTimings } from './types';
 import type { LayoutBox } from './yoga-layout';
 
 // ─── Text-heavy page detection ───────────────────────────────────────────────
@@ -179,6 +180,12 @@ async function step<T>(name: string, fn: () => Promise<T> | T): Promise<T> {
   }
 }
 
+// ─── Timing helpers ──────────────────────────────────────────────────────────
+
+function fmtTimings(t: PipelineTimings): string {
+  return `Pipeline: fetch ${t.fetch}ms | dom ${t.happydom}ms | layout ${t.yoga}ms | gdg ${t.gdg}ms | total ${t.total}ms`;
+}
+
 // ─── Shared: run DOM+layout+GDG on cached HTML ───────────────────────────────
 
 async function processCachedHtml(
@@ -273,6 +280,9 @@ export async function perceiveCore(req: PerceiveRequest): Promise<HollowPerceive
   const emit = getEmitter();
   const now = () => new Date().toISOString();
 
+  const pipelineStart = Date.now();
+  const timings: PipelineTimings = { fetch: 0, happydom: 0, yoga: 0, gdg: 0, total: 0 };
+
   console.log(`[hollow/pipeline] start sessionId=${sessionId} url=${req.url ?? '(html)'}`);
 
   // ── Step 1: Load or fetch HTML ───────────────────────────────────────────────
@@ -294,98 +304,171 @@ export async function perceiveCore(req: PerceiveRequest): Promise<HollowPerceive
   } else {
     if (!req.url) throw new Error('`url` is required when `html` is not provided');
 
-    // ── Step 1b: Mobile API Bypass (before HTML fetch) ──────────────────────────
-    const mobileResult = await step('1b-mobile-api', () => tryMobileAPIBypass(req.url!));
-    if (mobileResult) {
-      const ts = now();
-      const sessionState: SessionState = {
-        ...newSession(sessionId, req.url!, ''),
-        gdgMap: mobileResult.gdgMap,
-        confidence: 1.0,
-        tier: 'mobile-api',
-        tokenEstimate: mobileResult.tokenEstimate,
-      };
-      await step('8-session-save', () => saveSession(sessionState));
+    // ── Steps 1b/1c: Parallel route race ─────────────────────────────────────────
+    // For URLs in MOBILE_API_REGISTRY or CACHE_FIRST_DOMAINS, fire the fast route
+    // (mobile-API lookup or Wayback/Bing cache fetch) concurrently with the direct
+    // network fetch.  Promise.race() returns whichever wins; if the fast-route
+    // result has confidence >= 0.8 we return immediately and discard the pipeline.
+    // If it loses or is below threshold the pipeline result is used instead.
+    // A cache result that loses the quality race is kept as a WAF fallback.
 
-      emit.emit(sessionId, 'dom_delta', { html: '', url: req.url! });
-      emit.emit(sessionId, 'gdg_map', {
-        map: mobileResult.gdgMap,
-        confidence: 1.0,
-        tier: 'mobile-api',
-        actionableCount: 0,
-        tokenEstimate: mobileResult.tokenEstimate,
-        timestamp: ts,
-      });
-      emit.emit(sessionId, 'confidence', { score: 1.0, tier: 'mobile-api', deductions: [], timestamp: ts });
-      emit.emit(sessionId, 'log_entry', {
-        tag: 'GDG',
-        message: `Mobile API bypass: ${mobileResult.domain}. Tier: mobile-api.`,
-        timestamp: ts,
-      });
-      emit.emit(sessionId, 'tier', { tier: 'mobile-api' });
+    const RACE_MIN_CONFIDENCE = 0.8;
 
-      console.log(`[hollow/pipeline] complete sessionId=sess:${sessionId} tier=mobile-api domain=${mobileResult.domain}`);
-      return {
-        sessionId: `sess:${sessionId}`,
-        gdgMap: mobileResult.gdgMap,
-        domDelta: '',
-        confidence: 1.0,
-        confidenceDeductions: [],
-        jsErrors: [],
-        tier: 'mobile-api',
-        elementCount: 0,
-        actionableCount: 0,
-        tokenEstimate: mobileResult.tokenEstimate,
-      };
-    }
+    // cachedFallback: a processed cache result below the confidence threshold,
+    // kept in case the direct pipeline fails (WAF block etc.).
+    let cachedFallback: Awaited<ReturnType<typeof processCachedHtml>> | null = null;
+    let cacheResultMeta: import('./router').CacheResult | null = null;
 
-    // ── Step 1c: Cache-First — skip direct fetch for known paywalled domains ─────
-    if (shouldTryCacheFirst(req.url!)) {
+    if (isFastRouteCandidate(req.url!)) {
       const hostname = new URL(req.url!).hostname.replace(/^www\./, '');
-      emit.emitLog(sessionId, 'SYS', `Cache-first route: trying cached version of ${hostname}`);
-      const cacheResult = await step('1c-cache-first', () => tryCacheBypass(req.url!, 'Cache first'));
-      if (cacheResult) {
-        const cached = await step('1c-cache-pipeline', () =>
-          processCachedHtml(cacheResult, req.url!, sessionId, existingSession)
-        );
-        const ts = now();
-        const source = cacheResult.source === 'bing' ? 'Bing Cache' : 'Wayback Machine';
-        emit.emit(sessionId, 'dom_delta', { html: cached.html, url: req.url! });
-        emit.emit(sessionId, 'gdg_map', { map: cached.gdgMap, confidence: cached.confidence, tier: 'cache', actionableCount: cached.actionableCount, tokenEstimate: cached.tokenEstimate, timestamp: ts });
-        emit.emit(sessionId, 'confidence', { score: cached.confidence, tier: 'cache', deductions: cached.deductions, timestamp: ts });
-        emit.emit(sessionId, 'log_entry', { tag: 'GDG', message: `Cache-first hit: ${source} snapshot from ${cacheResult.cacheDate}. ${cached.tokenEstimate} tokens.`, timestamp: ts });
-        emit.emit(sessionId, 'tier', { tier: 'cache' });
-        console.log(`[hollow/pipeline] complete sessionId=sess:${sessionId} tier=cache source=${cacheResult.source}`);
-        return { sessionId: `sess:${sessionId}`, gdgMap: cached.gdgMap, domDelta: cached.html, confidence: cached.confidence, confidenceDeductions: cached.deductions, jsErrors: cached.jsErrors, tier: 'cache', elementCount: cached.elementCount, actionableCount: cached.actionableCount, tokenEstimate: cached.tokenEstimate };
+      emit.emitLog(sessionId, 'SYS', `Parallel route race: fast-route + pipeline for ${hostname}`);
+      console.log(`[hollow/pipeline] 1-race: starting fast-route + direct fetch in parallel for ${hostname}`);
+
+      const raceStart = Date.now();
+
+      // Both start immediately — the race drives the decision, not sequential checks.
+      const fastRoutePromise: Promise<FastRouteRaw | null> =
+        fetchFastRoute(req.url!).catch(() => null);
+      const directFetchPromise = fetchUrl(req.url!); // may throw NetworkFetchError
+
+      // Sentinel value: signals that the direct pipeline fetch resolved first.
+      const PIPELINE_WON = Symbol('pipeline-won');
+
+      const raceWinner = await Promise.race([
+        fastRoutePromise,
+        directFetchPromise.then(
+          () => PIPELINE_WON as typeof PIPELINE_WON,
+          () => PIPELINE_WON as typeof PIPELINE_WON, // errors count as "pipeline settled"
+        ),
+      ]);
+
+      // ── Fast route won ──────────────────────────────────────────────────────────
+      if (raceWinner !== PIPELINE_WON && raceWinner !== null) {
+        const raw = raceWinner as FastRouteRaw;
+        const raceMs = Date.now() - raceStart;
+
+        // Mobile API: confidence is always 1.0 — use immediately
+        if (raw.kind === 'mobile-api') {
+          const mr = raw.mobileResult;
+          timings.fetch = raceMs;
+          timings.total = Date.now() - pipelineStart;
+          emit.emitLog(sessionId, 'SYS', `Race winner: mobile-api (${mr.domain}) in ${raceMs}ms`);
+          const ts = now();
+          const sessionState: SessionState = {
+            ...newSession(sessionId, req.url!, ''),
+            gdgMap: mr.gdgMap,
+            confidence: 1.0,
+            tier: 'mobile-api',
+            tokenEstimate: mr.tokenEstimate,
+            timings,
+          };
+          await step('8-session-save', () => saveSession(sessionState));
+          emit.emit(sessionId, 'dom_delta', { html: '', url: req.url! });
+          emit.emit(sessionId, 'gdg_map', { map: mr.gdgMap, confidence: 1.0, tier: 'mobile-api', actionableCount: 0, tokenEstimate: mr.tokenEstimate, timestamp: ts });
+          emit.emit(sessionId, 'confidence', { score: 1.0, tier: 'mobile-api', deductions: [], timestamp: ts });
+          emit.emit(sessionId, 'log_entry', { tag: 'GDG', message: `Mobile API bypass: ${mr.domain}. Tier: mobile-api.`, timestamp: ts });
+          emit.emitLog(sessionId, 'SYS', fmtTimings(timings));
+          emit.emit(sessionId, 'tier', { tier: 'mobile-api' });
+          console.log(`[hollow/pipeline] complete sessionId=sess:${sessionId} tier=mobile-api domain=${mr.domain} raceMs=${raceMs}`);
+          return { sessionId: `sess:${sessionId}`, gdgMap: mr.gdgMap, domDelta: '', confidence: 1.0, confidenceDeductions: [], jsErrors: [], tier: 'mobile-api', elementCount: 0, actionableCount: 0, tokenEstimate: mr.tokenEstimate, timings };
+        }
+
+        // Cache: confidence 0.70 — use if above threshold; keep as WAF fallback otherwise
+        if (raw.kind === 'cache') {
+          console.log(`[hollow/pipeline] 1-race: cache fast-route resolved in ${raceMs}ms — processing HTML`);
+          const cached = await step('1c-cache-pipeline', () =>
+            processCachedHtml(raw.cacheResult, req.url!, sessionId, existingSession)
+          );
+
+          if (cached.confidence >= RACE_MIN_CONFIDENCE) {
+            timings.fetch = Date.now() - raceStart;
+            timings.total = Date.now() - pipelineStart;
+            const source = raw.cacheResult.source === 'bing' ? 'Bing Cache' : 'Wayback Machine';
+            emit.emitLog(sessionId, 'SYS', `Race winner: cache (${source}) in ${timings.fetch}ms`);
+            const ts = now();
+            emit.emit(sessionId, 'dom_delta', { html: cached.html, url: req.url! });
+            emit.emit(sessionId, 'gdg_map', { map: cached.gdgMap, confidence: cached.confidence, tier: 'cache', actionableCount: cached.actionableCount, tokenEstimate: cached.tokenEstimate, timestamp: ts });
+            emit.emit(sessionId, 'confidence', { score: cached.confidence, tier: 'cache', deductions: cached.deductions, timestamp: ts });
+            emit.emit(sessionId, 'log_entry', { tag: 'GDG', message: `Cache-first hit: ${source} snapshot from ${raw.cacheResult.cacheDate}. ${cached.tokenEstimate} tokens.`, timestamp: ts });
+            emit.emitLog(sessionId, 'SYS', fmtTimings(timings));
+            emit.emit(sessionId, 'tier', { tier: 'cache' });
+            console.log(`[hollow/pipeline] complete sessionId=sess:${sessionId} tier=cache source=${raw.cacheResult.source} raceMs=${raceMs}`);
+            return { sessionId: `sess:${sessionId}`, gdgMap: cached.gdgMap, domDelta: cached.html, confidence: cached.confidence, confidenceDeductions: cached.deductions, jsErrors: cached.jsErrors, tier: 'cache', elementCount: cached.elementCount, actionableCount: cached.actionableCount, tokenEstimate: cached.tokenEstimate, timings };
+          }
+
+          // Below confidence threshold — save for WAF fallback, continue to pipeline
+          emit.emitLog(sessionId, 'SYS', `Cache route below confidence threshold (${cached.confidence.toFixed(2)}) — using pipeline`);
+          console.log(`[hollow/pipeline] 1-race: cache confidence ${cached.confidence} < ${RACE_MIN_CONFIDENCE} — using as fallback only`);
+          cachedFallback = cached;
+          cacheResultMeta = raw.cacheResult;
+        }
       }
-      // Cache miss — fall through to direct fetch
-    }
 
-    emit.emitLog(sessionId, 'SYS', `Fetching ${req.url}`);
-    try {
-      const fetched = await step('1-fetch-url', () => fetchUrl(req.url!));
-      html = fetched.html;
-      finalUrl = fetched.finalUrl;
-    } catch (fetchErr) {
-      if (fetchErr instanceof NetworkFetchError) {
-        const isWAF = fetchErr.code === 'waf_block';
-        const payload = isWAF
-          ? { error: 'waf_block', message: 'WAF blocked the request', tier: 'partial' as const, route: 'pwa_relay_candidate' }
-          : { error: 'fetch_failed', status: fetchErr.statusCode, message: `Site returned HTTP ${fetchErr.statusCode}`, tier: 'partial' as const };
+      // ── Pipeline path (direct fetch won, or fast route below threshold) ─────────
+      const fetchStart = Date.now();
+      try {
+        emit.emitLog(sessionId, 'SYS', `Direct fetch: ${req.url}`);
+        const fetched = await directFetchPromise; // already resolved if PIPELINE_WON
+        timings.fetch = Date.now() - fetchStart;
+        html = fetched.html;
+        finalUrl = fetched.finalUrl;
+        console.log(`[hollow/pipeline] 1-race: direct fetch resolved in ${timings.fetch}ms`);
+      } catch (fetchErr) {
+        // Direct fetch failed — use cached result as fallback regardless of confidence
+        if (cachedFallback && cacheResultMeta) {
+          timings.fetch = Date.now() - raceStart;
+          timings.total = Date.now() - pipelineStart;
+          const source = cacheResultMeta.source === 'bing' ? 'Bing Cache' : 'Wayback Machine';
+          emit.emitLog(sessionId, 'SYS', `Direct fetch failed — using parallel cache result (${source}) as fallback`);
+          const ts = now();
+          emit.emit(sessionId, 'dom_delta', { html: cachedFallback.html, url: req.url! });
+          emit.emit(sessionId, 'gdg_map', { map: cachedFallback.gdgMap, confidence: cachedFallback.confidence, tier: 'cache', actionableCount: cachedFallback.actionableCount, tokenEstimate: cachedFallback.tokenEstimate, timestamp: ts });
+          emit.emit(sessionId, 'confidence', { score: cachedFallback.confidence, tier: 'cache', deductions: cachedFallback.deductions, timestamp: ts });
+          emit.emit(sessionId, 'log_entry', { tag: 'GDG', message: `Cache fallback: ${source} snapshot from ${cacheResultMeta.cacheDate}. ${cachedFallback.tokenEstimate} tokens.`, timestamp: ts });
+          emit.emitLog(sessionId, 'SYS', fmtTimings(timings));
+          emit.emit(sessionId, 'tier', { tier: 'cache' });
+          console.log(`[hollow/pipeline] complete sessionId=sess:${sessionId} tier=cache-fallback source=${cacheResultMeta.source}`);
+          return { sessionId: `sess:${sessionId}`, gdgMap: cachedFallback.gdgMap, domDelta: cachedFallback.html, confidence: cachedFallback.confidence, confidenceDeductions: cachedFallback.deductions, jsErrors: cachedFallback.jsErrors, tier: 'cache', elementCount: cachedFallback.elementCount, actionableCount: cachedFallback.actionableCount, tokenEstimate: cachedFallback.tokenEstimate, timings };
+        }
 
-        emit.emit(sessionId, 'log_entry', {
-          tag: 'ERR',
-          message: payload.message,
-          timestamp: now(),
-        });
-        emit.emit(sessionId, 'tier', { tier: 'partial' });
-
-        // Attach structured payload so the API route can return it as JSON
-        const wrapped = new Error(payload.message) as Error & { hollowNetworkPayload: typeof payload };
-        wrapped.hollowNetworkPayload = payload;
-        throw wrapped;
+        // No fallback — propagate the error (WAF block, HTTP error, etc.)
+        if (fetchErr instanceof NetworkFetchError) {
+          const isWAF = fetchErr.code === 'waf_block';
+          const payload = isWAF
+            ? { error: 'waf_block', message: 'WAF blocked the request', tier: 'partial' as const, route: 'pwa_relay_candidate' }
+            : { error: 'fetch_failed', status: fetchErr.statusCode, message: `Site returned HTTP ${fetchErr.statusCode}`, tier: 'partial' as const };
+          emit.emit(sessionId, 'log_entry', { tag: 'ERR', message: payload.message, timestamp: now() });
+          emit.emit(sessionId, 'tier', { tier: 'partial' });
+          const wrapped = new Error(payload.message) as Error & { hollowNetworkPayload: typeof payload };
+          wrapped.hollowNetworkPayload = payload;
+          throw wrapped;
+        }
+        throw fetchErr;
       }
-      throw fetchErr;
+
+    } else {
+      // ── Sequential path (no fast route for this URL) ──────────────────────────
+      emit.emitLog(sessionId, 'SYS', `Fetching ${req.url}`);
+      const fetchStart = Date.now();
+      try {
+        const fetched = await step('1-fetch-url', () => fetchUrl(req.url!));
+        timings.fetch = Date.now() - fetchStart;
+        html = fetched.html;
+        finalUrl = fetched.finalUrl;
+      } catch (fetchErr) {
+        if (fetchErr instanceof NetworkFetchError) {
+          const isWAF = fetchErr.code === 'waf_block';
+          const payload = isWAF
+            ? { error: 'waf_block', message: 'WAF blocked the request', tier: 'partial' as const, route: 'pwa_relay_candidate' }
+            : { error: 'fetch_failed', status: fetchErr.statusCode, message: `Site returned HTTP ${fetchErr.statusCode}`, tier: 'partial' as const };
+          emit.emit(sessionId, 'log_entry', { tag: 'ERR', message: payload.message, timestamp: now() });
+          emit.emit(sessionId, 'tier', { tier: 'partial' });
+          const wrapped = new Error(payload.message) as Error & { hollowNetworkPayload: typeof payload };
+          wrapped.hollowNetworkPayload = payload;
+          throw wrapped;
+        }
+        throw fetchErr;
+      }
     }
   }
 
@@ -427,7 +510,8 @@ export async function perceiveCore(req: PerceiveRequest): Promise<HollowPerceive
       tokenEstimate: textResult.tokenEstimate,
     };
 
-    await step('2t-session-save', () => saveSession(sessionState));
+    timings.total = Date.now() - pipelineStart;
+    await step('2t-session-save', () => saveSession({ ...sessionState, timings }));
 
     const ts = now();
     emit.emit(sessionId, 'dom_delta', { html, url: finalUrl });
@@ -445,6 +529,7 @@ export async function perceiveCore(req: PerceiveRequest): Promise<HollowPerceive
       message: `Text extraction complete. ${textResult.actionableCount} links. ${textResult.tokenEstimate} tokens. Confidence: ${confidence}. Tier: text.`,
       timestamp: ts,
     });
+    emit.emitLog(sessionId, 'SYS', fmtTimings(timings));
     emit.emit(sessionId, 'tier', { tier });
 
     console.log(`[hollow/pipeline] complete sessionId=sess:${sessionId} tier=text links=${textResult.actionableCount} tokens=${textResult.tokenEstimate}`);
@@ -459,13 +544,16 @@ export async function perceiveCore(req: PerceiveRequest): Promise<HollowPerceive
       elementCount: 0,
       actionableCount: textResult.actionableCount,
       tokenEstimate: textResult.tokenEstimate,
+      timings,
     };
   }
 
   // ── Step 2: Happy DOM — parse HTML, execute JS ───────────────────────────────
+  const domStart = Date.now();
   const { window, document, vitality, jsExecutionTimedOut, reactDetected } = await step('2-happy-dom', () =>
     buildDOM(html, finalUrl)
   );
+  timings.happydom = Date.now() - domStart;
 
   const jsErrors = vitality.getErrors();
   console.log(`[hollow/pipeline] 2-happy-dom: jsErrors=${jsErrors.length} timedOut=${jsExecutionTimedOut} reactDetected=${reactDetected}`);
@@ -527,7 +615,8 @@ export async function perceiveCore(req: PerceiveRequest): Promise<HollowPerceive
         tokenEstimate: vdomResult.tokenEstimate,
       };
 
-      await step('8-session-save', () => saveSession(sessionState));
+      timings.total = Date.now() - pipelineStart;
+      await step('8-session-save', () => saveSession({ ...sessionState, timings }));
       window.happyDOM.close();
 
       const ts = now();
@@ -546,6 +635,7 @@ export async function perceiveCore(req: PerceiveRequest): Promise<HollowPerceive
         message: `React Fiber tree extracted. ${vdomResult.nodeCount} nodes. ${vdomResult.actionableCount} actionable. Confidence: ${confidence}. Tier: vdom.`,
         timestamp: ts,
       });
+      emit.emitLog(sessionId, 'SYS', fmtTimings(timings));
       emit.emit(sessionId, 'tier', { tier });
 
       console.log(
@@ -563,6 +653,7 @@ export async function perceiveCore(req: PerceiveRequest): Promise<HollowPerceive
         elementCount: vdomResult.nodeCount,
         actionableCount: vdomResult.actionableCount,
         tokenEstimate: vdomResult.tokenEstimate,
+        timings,
       };
     }
 
@@ -570,6 +661,7 @@ export async function perceiveCore(req: PerceiveRequest): Promise<HollowPerceive
   }
 
   // ── Steps 3–4: CSS + Yoga Flexbox layout ────────────────────────────────────
+  const yogaStart = Date.now();
   let layoutMap: Awaited<ReturnType<typeof calculateLayout>>['layoutMap'];
   let layoutDeductions: Awaited<ReturnType<typeof calculateLayout>>['deductions'];
   try {
@@ -633,8 +725,10 @@ export async function perceiveCore(req: PerceiveRequest): Promise<HollowPerceive
       await calculateSubtreeLayout(el, box, window, layoutMap, layoutDeductions);
     }
   });
+  timings.yoga = Date.now() - yogaStart;
 
   // ── Step 6: GDG Spatial ──────────────────────────────────────────────────────
+  const gdgStart = Date.now();
   const gdg = await step('6-gdg-spatial', () =>
     Promise.resolve(generateGDGSpatial(
       body as unknown as Element,
@@ -645,6 +739,7 @@ export async function perceiveCore(req: PerceiveRequest): Promise<HollowPerceive
       gridColCounts
     ))
   );
+  timings.gdg = Date.now() - gdgStart;
   console.log(`[hollow/pipeline] 6-gdg-spatial: tokens=${gdg.tokenEstimate} actionable=${gdg.actionableCount}`);
 
   // ── Step 7: Confidence scoring ────────────────────────────────────────────────
@@ -680,9 +775,11 @@ export async function perceiveCore(req: PerceiveRequest): Promise<HollowPerceive
       emit.emit(sessionId, 'gdg_map', { map: cached.gdgMap, confidence: cached.confidence, tier: 'cache', actionableCount: cached.actionableCount, tokenEstimate: cached.tokenEstimate, timestamp: cTs });
       emit.emit(sessionId, 'confidence', { score: cached.confidence, tier: 'cache', deductions: cached.deductions, timestamp: cTs });
       emit.emit(sessionId, 'log_entry', { tag: 'GDG', message: `Cache bypass: ${source} snapshot from ${cacheResult.cacheDate}. ${cached.tokenEstimate} tokens. Confidence: ${cached.confidence}.`, timestamp: cTs });
+      timings.total = Date.now() - pipelineStart;
+      emit.emitLog(sessionId, 'SYS', fmtTimings(timings));
       emit.emit(sessionId, 'tier', { tier: 'cache' });
       console.log(`[hollow/pipeline] complete sessionId=sess:${sessionId} tier=cache source=${cacheResult.source}`);
-      return { sessionId: `sess:${sessionId}`, gdgMap: cached.gdgMap, domDelta: cached.html, confidence: cached.confidence, confidenceDeductions: cached.deductions, jsErrors: cached.jsErrors, tier: 'cache', elementCount: cached.elementCount, actionableCount: cached.actionableCount, tokenEstimate: cached.tokenEstimate };
+      return { sessionId: `sess:${sessionId}`, gdgMap: cached.gdgMap, domDelta: cached.html, confidence: cached.confidence, confidenceDeductions: cached.deductions, jsErrors: cached.jsErrors, tier: 'cache', elementCount: cached.elementCount, actionableCount: cached.actionableCount, tokenEstimate: cached.tokenEstimate, timings };
     }
   }
 
@@ -699,7 +796,8 @@ export async function perceiveCore(req: PerceiveRequest): Promise<HollowPerceive
     tokenEstimate: gdg.tokenEstimate,
   };
 
-  await step('8-session-save', () => saveSession(sessionState));
+  timings.total = Date.now() - pipelineStart;
+  await step('8-session-save', () => saveSession({ ...sessionState, timings }));
 
   window.happyDOM.close();
 
@@ -721,6 +819,7 @@ export async function perceiveCore(req: PerceiveRequest): Promise<HollowPerceive
     message: `Perception map generated. ${gdg.tokenEstimate} tokens. Confidence: ${confidence}. Tier: ${tier}.`,
     timestamp: ts,
   });
+  emit.emitLog(sessionId, 'SYS', fmtTimings(timings));
 
   if (deductions.length > 0) {
     for (const d of deductions) {
@@ -744,7 +843,7 @@ export async function perceiveCore(req: PerceiveRequest): Promise<HollowPerceive
 
   // ── Step 10: Response ──────────────────────────────────────────────────────────
   console.log(
-    `[hollow/pipeline] complete sessionId=sess:${sessionId} confidence=${confidence} tier=${tier} elements=${layoutMap.size} redisWrite=OK`
+    `[hollow/pipeline] complete sessionId=sess:${sessionId} confidence=${confidence} tier=${tier} elements=${layoutMap.size} fetch=${timings.fetch}ms dom=${timings.happydom}ms yoga=${timings.yoga}ms gdg=${timings.gdg}ms total=${timings.total}ms`
   );
 
   return {
@@ -758,5 +857,6 @@ export async function perceiveCore(req: PerceiveRequest): Promise<HollowPerceive
     elementCount: layoutMap.size,
     actionableCount: gdg.actionableCount,
     tokenEstimate: gdg.tokenEstimate,
+    timings,
   };
 }

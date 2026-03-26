@@ -94,7 +94,12 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       });
     }
 
-    return NextResponse.json(result, { status: 200 });
+    return NextResponse.json(result, {
+      status: 200,
+      headers: {
+        'Timing-Allow-Origin': '*',
+      },
+    });
   } catch (err) {
     // Structured network errors (WAF block, HTTP error) — return as clean JSON
     const networkPayload = (err as { hollowNetworkPayload?: unknown }).hollowNetworkPayload;

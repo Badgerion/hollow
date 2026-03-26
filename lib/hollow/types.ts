@@ -115,6 +115,21 @@ export interface ComputedStyles {
   rowGap: string;
 }
 
+// ─── Pipeline Timings ─────────────────────────────────────────────────────────
+
+export interface PipelineTimings {
+  /** Network IO — fetch URL or fast-route lookup (ms) */
+  fetch:    number;
+  /** Happy DOM parse + JS execution (ms) */
+  happydom: number;
+  /** Yoga Flexbox + CSS Grid layout (ms) */
+  yoga:     number;
+  /** GDG Spatial map generation (ms) */
+  gdg:      number;
+  /** Wall-clock from pipeline start to response (ms) */
+  total:    number;
+}
+
 // ─── Session ─────────────────────────────────────────────────────────────────
 
 export interface SessionState {
@@ -129,6 +144,7 @@ export interface SessionState {
   confidence?: number;
   tier?: 'hollow' | 'partial' | 'vdom' | 'mobile-api' | 'cache' | 'text';
   tokenEstimate?: number;
+  timings?: PipelineTimings;
 }
 
 // ─── Pipeline Result ─────────────────────────────────────────────────────────
@@ -144,6 +160,7 @@ export interface HollowPerceiveResult {
   elementCount: number;
   actionableCount: number;
   tokenEstimate: number;
+  timings?: PipelineTimings;
 }
 
 // ─── API Request / Response ───────────────────────────────────────────────────

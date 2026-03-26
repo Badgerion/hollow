@@ -592,3 +592,75 @@ async function tryWaybackCache(url: string, hostname: string, label: string): Pr
     return null;
   }
 }
+
+// ─── Parallel route racing ────────────────────────────────────────────────────
+//
+// For URLs in MOBILE_API_REGISTRY or CACHE_FIRST_DOMAINS the fast route and
+// the full Happy DOM pipeline are fired simultaneously.  Promise.race() picks
+// whichever resolves first; if the fast-route result meets the confidence
+// threshold the pipeline result is discarded.
+
+export type FastRouteRaw =
+  | { kind: 'mobile-api'; mobileResult: MobileAPIResult }
+  | { kind: 'cache';      cacheResult: CacheResult };
+
+/**
+ * Returns true when the URL has a registered fast route — a mobile-API
+ * endpoint or a paywall-bypassing cache entry in CACHE_FIRST_DOMAINS.
+ */
+export function isFastRouteCandidate(url: string): boolean {
+  try {
+    const hostname = new URL(url).hostname.replace(/^www\./, '');
+    return !!MOBILE_API_REGISTRY[hostname] || shouldTryCacheFirst(url);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Fire all applicable fast routes for `url` concurrently and return the first
+ * non-null result.
+ *
+ * Race this against the full Happy DOM pipeline in pipeline.ts:
+ *
+ *   const winner = await Promise.race([fetchFastRoute(url), pipelinePromise]);
+ *
+ * Returns null when all fast routes miss (every check resolves to null).
+ */
+export function fetchFastRoute(url: string): Promise<FastRouteRaw | null> {
+  const tasks: Promise<FastRouteRaw | null>[] = [];
+
+  try {
+    const hostname = new URL(url).hostname.replace(/^www\./, '');
+    if (MOBILE_API_REGISTRY[hostname]) {
+      tasks.push(
+        tryMobileAPIBypass(url)
+          .then(r => r ? ({ kind: 'mobile-api', mobileResult: r } as FastRouteRaw) : null)
+          .catch(() => null),
+      );
+    }
+  } catch { /* ignore bad URL */ }
+
+  if (shouldTryCacheFirst(url)) {
+    tasks.push(
+      tryCacheBypass(url, 'Parallel cache')
+        .then(r => r ? ({ kind: 'cache', cacheResult: r } as FastRouteRaw) : null)
+        .catch(() => null),
+    );
+  }
+
+  if (tasks.length === 0) return Promise.resolve(null);
+
+  // Resolve with the first non-null result; resolve null only after all settle.
+  return new Promise<FastRouteRaw | null>(resolve => {
+    let remaining = tasks.length;
+    for (const t of tasks) {
+      t.then(result => {
+        if (result !== null) resolve(result);
+        else if (--remaining === 0) resolve(null);
+      }).catch(() => {
+        if (--remaining === 0) resolve(null);
+      });
+    }
+  });
+}
