@@ -53,7 +53,7 @@ A browser pipeline has two separable concerns: **layout** (where things are — 
 
 Hollow keeps the layout step and drops everything after it.
 
-It uses Happy DOM to execute JavaScript and build the DOM tree, then Yoga — the same layout engine that powers React Native — to calculate exact coordinates for every element. The result is a structured spatial tree called a GDG Spatial map: element IDs, positions, relationships. Everything an agent needs to reason and act. Nothing an agent doesn't.
+It uses Happy DOM to execute JavaScript and build the DOM tree, then Yoga — the same layout engine that powers React Native — to calculate exact coordinates for every element. The result is a structured spatial tree called a [Graphical Density Grounding](https://github.com/Badgerion/GDG-browser) Spatial map: element IDs, positions, relationships. Everything an agent needs to reason and act. Nothing an agent doesn't.
 
 ```
 [Viewport: 1280x800]
@@ -106,6 +106,16 @@ Scan the QR code from any active session. Paste the system prompt into Claude, G
 
 ---
 
+## SDKs and integrations
+
+| Package | Install | Description |
+|---------|---------|-------------|
+| **[hollow-sdk](https://npmjs.com/package/hollow-sdk)** | `npm install hollow-sdk` | TypeScript/Node SDK |
+| **[hollow-sdk](https://pypi.org/project/hollow-sdk/)** | `pip install hollow-sdk` | Python SDK |
+| **[hollow-mcp](https://npmjs.com/package/hollow-mcp)** | `npx hollow-mcp` | MCP server for Claude Desktop |
+
+---
+
 ## Connect an agent
 
 ```typescript
@@ -126,7 +136,7 @@ async function runAgent(task: string) {
       model: "claude-sonnet-4-20250514",
       max_tokens: 1024,
       system: `You are an AI agent with access to Hollow, a serverless browser.
-You receive GDG Spatial maps — structured page trees with actionable element IDs.
+You receive Graphical Density Grounding Spatial maps — structured page trees with actionable element IDs.
 Respond with JSON only:
 { "type": "navigate", "url": "https://..." }
 { "type": "click", "elementId": 3 }
