@@ -492,6 +492,14 @@ export function MatrixMirror({ sessionId }: { sessionId: string | null }) {
   /* Auto-scroll log */
   useEffect(() => { const el = logRef.current; if (el) el.scrollTop = el.scrollHeight; }, [log]);
 
+  /* Populate URL bar when session URL becomes known */
+  useEffect(() => {
+    const td = tabs.find(t => t.sessionId === sessionId);
+    const url = td?.url ?? (currentUrl !== '—' ? currentUrl : null);
+    if (url && !navInput) setNavInput(url);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tabs, sessionId, currentUrl]);
+
   /* Highlight iframe element */
   useEffect(() => {
     if (activeId === null || !iframeRef.current) return;
@@ -721,7 +729,7 @@ export function MatrixMirror({ sessionId }: { sessionId: string | null }) {
         {/* Window */}
         <div style={{
           pointerEvents: 'all',
-          width: 'calc(100vw - 80px)', maxWidth: 1400,
+          width: 'calc(100vw - 220px)', maxWidth: 1160,
           height: 'calc(100vh - 130px)',
           background: '#0e0e10',
           borderRadius: 10,
