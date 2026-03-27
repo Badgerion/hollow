@@ -42,7 +42,7 @@ Matrix Mirror is the observability UI — a macOS desktop environment where Holl
 Scan the QR code from any active session. Paste the system prompt into Claude, GPT, or Gemini. Working browser in 30 seconds. No API key. No setup.
 
 ![Matrix Mirror showing startpage loaded in the Ghost DOM](https://raw.githubusercontent.com/Badgerion/hollow/main/assets/Mirror-v2-1.png)
-![Matrix Mirror showing Hacker News loaded in the Ghost DOM with element badges, TEXT tier, 1.00 confidence](https://raw.githubusercontent.com/Badgerion/hollow/main/assets/Mirror-v2-2.png)
+![Matrix Mirror showing Hacker News loaded in the Matrix Mirror with element badges, PARTIAL tier, 0.35 confidence](https://raw.githubusercontent.com/Badgerion/hollow/main/assets/Mirror-v2-3)
 
 ---
 
