@@ -37,12 +37,12 @@ The agent reads the map. Decides. Acts. The function terminates. Nothing idles.
 ## Try it
 **[hollow-tan-omega.vercel.app/mirror](https://hollow-tan-omega.vercel.app/mirror)**
 
-Matrix Mirror is the observability UI — a macOS desktop environment where Hollow is the only application. Type any URL, watch it load in the Ghost DOM, see every element tagged and addressable, watch every routing decision in the agent log.
+Matrix Mirror is the observability UI. Type any URL, watch it load in the Ghost DOM, see every element tagged and addressable, watch every routing decision in the agent log.
 
 Scan the QR code from any active session. Paste the system prompt into Claude, GPT, or Gemini. Working browser in 30 seconds. No API key. No setup.
 
 ![Matrix Mirror showing startpage loaded in the Ghost DOM](https://raw.githubusercontent.com/Badgerion/hollow/main/assets/Mirror-v2-1.png)
-![Matrix Mirror showing Hacker News loaded in the Matrix Mirror with element badges, PARTIAL tier, 0.35 confidence](https://raw.githubusercontent.com/Badgerion/hollow/main/assets/Mirror-v2-3)
+![Matrix Mirror showing Hacker News loaded in the Matrix Mirror with element badges, PARTIAL tier, 0.35 confidence](https://raw.githubusercontent.com/Badgerion/hollow/main/assets/Mirror-v2-3.png)
 
 ---
 
