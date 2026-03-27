@@ -450,7 +450,6 @@ function LandingContent() {
         @media (max-width: 600px) {
           .hollow-grid { grid-template-columns: 1fr !important; }
         }
-        @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&display=swap');
       `}</style>
     </div>
   );

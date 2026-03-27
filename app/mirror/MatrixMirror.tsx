@@ -379,38 +379,127 @@ function StartPanel() {
 
 /* ─── QR Panel ───────────────────────────────────────────────────────────────── */
 
-function QRPanel({ sessionId, onClose }: { sessionId: string; onClose: () => void }) {
+function QRPanel({ sessionId, onClose }: { sessionId: string | null; onClose: () => void }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const origin = typeof window !== 'undefined' ? window.location.origin : 'https://hollow-tan-omega.vercel.app';
-  const payload = JSON.stringify({ hollow: origin, perceive: '/api/perceive', act: '/api/act', docs: 'github.com/Badgerion/hollow' });
+  const [copied, setCopied] = useState(false);
+
+  const BASE = 'https://hollow-tan-omega.vercel.app';
+  const connectionUrl = sessionId
+    ? `${BASE}/?session=${encodeURIComponent(sessionId)}`
+    : BASE;
 
   useEffect(() => {
     if (!canvasRef.current) return;
     import('qrcode').then(QRCode => {
-      QRCode.toCanvas(canvasRef.current!, payload, {
-        width: 128, margin: 1,
-        color: { dark: '#e2e2e2', light: '#0e0e10' },
+      QRCode.toCanvas(canvasRef.current!, connectionUrl, {
+        width: 160, margin: 1,
+        color: { dark: '#e2e2e2', light: '#111113' },
       });
     });
-  }, [payload]);
+  }, [connectionUrl]);
+
+  async function handleCopy() {
+    try {
+      await navigator.clipboard.writeText(connectionUrl);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch { /* clipboard denied */ }
+  }
 
   return (
-    <div style={{
-      position: 'absolute', top: 44, right: 12, width: 168,
-      background: '#1c1c1e', border: '1px solid rgba(255,255,255,0.1)',
-      borderRadius: 10, padding: 16, zIndex: 400,
-      display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 10,
-      boxShadow: '0 24px 64px rgba(0,0,0,0.85)',
-    }}>
-      <button onClick={onClose} style={{ position: 'absolute', top: 8, right: 10, background: 'none', border: 'none', color: 'rgba(255,255,255,0.3)', cursor: 'pointer', fontSize: 16, lineHeight: 1, padding: 0 }}>×</button>
-      <canvas ref={canvasRef} style={{ borderRadius: 4 }} />
-      <div style={{ fontFamily: FONT, fontSize: 9, color: 'rgba(255,255,255,0.4)', textAlign: 'center', lineHeight: 1.6 }}>
-        Scan to connect any AI
+    <>
+      {/* Backdrop — click outside to close */}
+      <div style={{ position: 'fixed', inset: 0, zIndex: 999 }} onClick={onClose} />
+
+      {/* Modal */}
+      <div style={{
+        position: 'fixed', top: 70, right: 20, width: 320,
+        background: '#111113',
+        border: '1px solid rgba(255,255,255,0.12)',
+        borderRadius: 10,
+        boxShadow: '0 20px 60px rgba(0,0,0,0.8)',
+        padding: 20,
+        zIndex: 1000,
+        fontFamily: FONT,
+      }}>
+        {/* X */}
+        <button
+          onClick={onClose}
+          style={{ position: 'absolute', top: 10, right: 12, background: 'none', border: 'none', color: 'rgba(255,255,255,0.3)', cursor: 'pointer', fontSize: 18, lineHeight: 1, padding: 0 }}
+        >×</button>
+
+        {/* QR code */}
+        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8, marginBottom: 14 }}>
+          <canvas ref={canvasRef} style={{ borderRadius: 4 }} />
+          {!sessionId && (
+            <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.35)', textAlign: 'center', lineHeight: 1.5, padding: '0 8px' }}>
+              Load a page first to get a session URL
+            </div>
+          )}
+          <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.4)', textAlign: 'center' }}>
+            Scan to connect any AI
+          </div>
+        </div>
+
+        {/* Divider */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 14 }}>
+          <div style={{ flex: 1, height: 1, background: 'rgba(255,255,255,0.06)' }} />
+          <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.25)' }}>or</span>
+          <div style={{ flex: 1, height: 1, background: 'rgba(255,255,255,0.06)' }} />
+        </div>
+
+        {/* Session URL */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          <div style={{ fontSize: 9, color: 'rgba(255,255,255,0.3)', letterSpacing: '0.15em' }}>SESSION URL</div>
+          <div
+            title={connectionUrl}
+            style={{
+              background: '#0a0a0b',
+              border: '1px solid rgba(255,255,255,0.08)',
+              borderRadius: 6,
+              padding: '8px 12px',
+              fontSize: 10,
+              color: '#00d4a4',
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap',
+            }}
+          >{connectionUrl}</div>
+          <button
+            onClick={handleCopy}
+            style={{
+              width: '100%', padding: '7px 0',
+              background: copied ? 'rgba(0,212,164,0.12)' : 'rgba(255,255,255,0.06)',
+              border: `1px solid ${copied ? 'rgba(0,212,164,0.3)' : 'rgba(255,255,255,0.1)'}`,
+              borderRadius: 6, fontSize: 11, cursor: 'pointer',
+              color: copied ? '#00d4a4' : 'rgba(255,255,255,0.6)',
+              fontFamily: FONT,
+              transition: 'background 0.15s, color 0.15s, border-color 0.15s',
+            }}
+          >{copied ? 'Copied ✓' : 'Copy URL'}</button>
+        </div>
+
+        {/* Open connection page */}
+        <a
+          href={connectionUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+          style={{
+            display: 'block', textAlign: 'center',
+            marginTop: 10, padding: '8px 0',
+            background: '#00d4a4', borderRadius: 6,
+            fontSize: 11, fontWeight: 600,
+            color: '#000', textDecoration: 'none',
+            fontFamily: FONT, letterSpacing: '0.02em',
+          }}
+        >Open connection page ↗</a>
+
+        {/* Hint */}
+        <div style={{ marginTop: 10, fontSize: 9, color: 'rgba(255,255,255,0.25)', textAlign: 'center', lineHeight: 1.7 }}>
+          Paste the session URL or scan the QR<br />into Claude, GPT, or Gemini
+        </div>
       </div>
-      <div style={{ fontFamily: FONT, fontSize: 9, color: 'rgba(255,255,255,0.2)', textAlign: 'center', wordBreak: 'break-all' }}>
-        {sessionId.slice(0, 22)}…
-      </div>
-    </div>
+    </>
   );
 }
 
@@ -706,7 +795,6 @@ export function MatrixMirror({ sessionId }: { sessionId: string | null }) {
   return (
     <>
       <style>{`
-        @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500&display=swap');
         *, *::before, *::after { box-sizing: border-box; }
         body { margin: 0; overflow: hidden; background: #0d0d1a; }
         ::-webkit-scrollbar { width: 4px; height: 4px; }
@@ -718,6 +806,12 @@ export function MatrixMirror({ sessionId }: { sessionId: string | null }) {
         .hov-new-tab:hover { color: rgba(255,255,255,0.8) !important; }
         .tl-sym { opacity: 0; transition: opacity 0.1s; }
         .tl-group:hover .tl-sym { opacity: 1; }
+        @keyframes pulse-teal {
+          0%, 100% { box-shadow: 0 0 0 0 rgba(0,212,164,0.4); }
+          50%       { box-shadow: 0 0 0 8px rgba(0,212,164,0); }
+        }
+        .connect-pulse { animation: pulse-teal 2s ease 3; }
+        .connect-btn:hover { background: #00b894 !important; transform: scale(1.02); }
       `}</style>
 
       <Wallpaper />
@@ -775,14 +869,19 @@ export function MatrixMirror({ sessionId }: { sessionId: string | null }) {
 
             {/* Right controls */}
             <div style={{ marginLeft: 'auto', display: 'flex', gap: 6, alignItems: 'center', flexShrink: 0 }}>
-              {sessionId && (
-                <button
-                  onClick={() => setShowQR(q => !q)}
-                  style={{ ...tbBtn, background: showQR ? 'rgba(255,255,255,0.18)' : tbBtn.background }}
-                >
-                  ⊞ CONNECT
-                </button>
-              )}
+              <button
+                className="connect-btn connect-pulse"
+                onClick={() => setShowQR(q => !q)}
+                style={{
+                  height: 24, padding: '0 14px',
+                  background: '#00d4a4',
+                  border: 'none', borderRadius: 6,
+                  fontFamily: FONT, fontSize: 11, fontWeight: 600,
+                  letterSpacing: '0.05em', color: '#000',
+                  cursor: 'pointer',
+                  transition: 'background 0.15s, transform 0.15s',
+                }}
+              >⊞ CONNECT</button>
               <button
                 onClick={() => setShowLog(l => !l)}
                 style={{ ...tbBtn, background: showLog ? 'rgba(255,255,255,0.18)' : tbBtn.background }}
@@ -790,8 +889,6 @@ export function MatrixMirror({ sessionId }: { sessionId: string | null }) {
                 ≡ LOG
               </button>
             </div>
-
-            {showQR && sessionId && <QRPanel sessionId={sessionId} onClose={() => setShowQR(false)} />}
           </div>
 
           {/* ── Tab bar ───────────────────────────────────────────────── */}
@@ -955,6 +1052,9 @@ export function MatrixMirror({ sessionId }: { sessionId: string | null }) {
       </div>
 
       <Dock active={!!sessionId} />
+
+      {/* QR modal — rendered at root so window overflow:hidden can't clip it */}
+      {showQR && <QRPanel sessionId={sessionId} onClose={() => setShowQR(false)} />}
     </>
   );
 }
