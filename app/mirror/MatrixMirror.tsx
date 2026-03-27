@@ -589,6 +589,17 @@ export function MatrixMirror({ sessionId }: { sessionId: string | null }) {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tabs, sessionId, currentUrl]);
 
+  /* Auto-start: load Startpage immediately when no session is provided */
+  useEffect(() => {
+    if (sessionId) return; // already in a session
+    let cancelled = false;
+    callPerceive('https://www.startpage.com').then(r => {
+      if (!cancelled) window.location.href = `/mirror?session=${encodeURIComponent(r.sessionId)}`;
+    }).catch(() => { /* leave StartPanel visible on failure */ });
+    return () => { cancelled = true; };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   /* Highlight iframe element */
   useEffect(() => {
     if (activeId === null || !iframeRef.current) return;
